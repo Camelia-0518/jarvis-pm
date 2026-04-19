@@ -1,0 +1,25 @@
+# Jarvis PM API - Development Dependencies
+# Generated: 2026-04-11
+
+# Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.1.0
+httpx>=0.25.0
+
+# Code Quality
+black>=23.0.0
+isort>=5.12.0
+mypy>=1.7.0
+flake8>=6.1.0
+
+# Debugging
+ipython>=8.14.0
+ipdb>=0.13.13
+
+# Documentation
+mkdocs>=1.5.0
+mkdocs-material>=9.4.0
+
+# Pre-commit
+pre-commit>=3.5.0

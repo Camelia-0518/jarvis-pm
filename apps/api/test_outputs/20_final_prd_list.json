@@ -1,0 +1,30 @@
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": "4e2e7bca-99ae-43fb-9c35-c04e105836bd",
+        "project_id": "cb099957-7e43-49b8-81ea-e1505eb63009",
+        "title": "医疗模板 PRD",
+        "version": "1.0",
+        "status": "draft",
+        "created_at": "2026-04-15T06:05:21",
+        "updated_at": null
+      },
+      {
+        "id": "2e65716f-1888-4f16-8aec-b8d5927e60fe",
+        "project_id": "cb099957-7e43-49b8-81ea-e1505eb63009",
+        "title": "默认模板 PRD",
+        "version": "1.0",
+        "status": "draft",
+        "created_at": "2026-04-15T06:04:00",
+        "updated_at": null
+      }
+    ],
+    "total": 2
+  },
+  "error": null,
+  "meta": {
+    "timestamp": "2026-04-15T06:08:24.165183"
+  }
+}
