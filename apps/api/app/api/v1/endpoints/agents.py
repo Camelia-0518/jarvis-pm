@@ -44,7 +44,7 @@ class PRDRequest(BaseModel):
     product_name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(..., min_length=10)
     target_users: str = Field(..., min_length=1)
-    key_features: List[str] = Field(..., min_items=1)
+    key_features: List[str] = Field(..., min_length=1)
     constraints: Optional[List[str]] = []
     sections: Optional[List[str]] = None
 

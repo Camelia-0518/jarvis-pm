@@ -34,13 +34,32 @@ async def lifespan(app: FastAPI):
     # Validate LLM configuration
     available = settings.available_llm_providers
     if not available:
-        logging.warning(
-            "No real LLM provider API keys are configured. "
-            "The application will fall back to MockLLM. "
-            "Set KIMI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY to enable real LLM responses."
+        logging.error(
+            "[CRITICAL] No real LLM provider API keys are configured. "
+            "Jarvis PM requires a real AI provider to function. "
+            "Set KIMI_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY in your .env file."
         )
     else:
         logging.info("Available LLM providers: %s", ", ".join(available))
+        try:
+            from app.agents.llm_client import LLMClientFactory
+            test_client = LLMClientFactory.create(settings.DEFAULT_AI_PROVIDER)
+            logging.info("Default LLM client (%s) initialized successfully", settings.DEFAULT_AI_PROVIDER)
+        except Exception as e:
+            logging.error("Failed to initialize default LLM client: %s", e)
+
+    # Single-user mode safety warning
+    if settings.SINGLE_USER_MODE:
+        logging.warning(
+            "[SECURITY] SINGLE_USER_MODE is enabled. All requests without "
+            "authentication will be treated as 'single-user'. "
+            "This should NEVER be used in production (DEBUG=false)."
+        )
+        if not settings.DEBUG:
+            logging.error(
+                "[CRITICAL] SINGLE_USER_MODE is enabled with DEBUG=false. "
+                "This is a security risk. Disable SINGLE_USER_MODE for production."
+            )
 
     # Initialize cache
     await init_cache()
@@ -95,23 +114,25 @@ register_exception_handlers(app)
 
 # Add middleware (order matters - first added is first executed)
 
-# 1. Trusted Host Middleware
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=["*"] if settings.DEBUG else ["localhost", "*.jarvis-pm.com"]
-)
+# 1. Trusted Host Middleware — skipped in DEBUG mode to avoid Starlette
+#    rejecting wildcard host checks (e.g. TestClient requests)
+if not settings.DEBUG:
+    app.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=["localhost", "*.jarvis-pm.com"]
+    )
 
 # 2. CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
-# 3. GZip Compression
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# 3. GZip Compression — disabled to prevent SSE streaming buffering
+# app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 
@@ -129,12 +150,28 @@ async def add_process_time_header(request: Request, call_next):
 # Request ID middleware
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
-    """Add request ID for tracing"""
+    """Add request ID for tracing. Reuses client-provided ID if present."""
     import uuid
-    request_id = str(uuid.uuid4())
+    client_request_id = request.headers.get("X-Request-ID")
+    request_id = client_request_id or str(uuid.uuid4())
     request.state.request_id = request_id
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
+    return response
+
+
+# Security headers middleware
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    """Add security headers to all responses"""
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    if not settings.DEBUG:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
 
 
@@ -170,24 +207,31 @@ async def health_check():
 @app.get("/health/llm", tags=["Health"])
 async def health_llm():
     """LLM provider health check"""
-    from app.agents.llm_client import LLMClientFactory, MockLLMClient
+    from app.agents.llm_client import LLMClientFactory
 
     available = settings.available_llm_providers
     default = settings.DEFAULT_AI_PROVIDER
 
-    # Check if default provider is usable
+    # Check if default provider is usable (real AI only)
     try:
         client = LLMClientFactory.create(default if default != "fallback" else "kimi")
-        default_usable = not isinstance(client, MockLLMClient)
-    except ValueError:
+        default_usable = True
+    except ValueError as e:
         default_usable = False
+        init_error = str(e)
+    except Exception as e:
+        default_usable = False
+        init_error = str(e)
+    else:
+        init_error = None
 
     return {
-        "status": "healthy" if available else "degraded",
+        "status": "healthy" if (available and default_usable) else "degraded",
         "default_provider": default,
         "default_provider_usable": default_usable,
         "available_providers": available,
-        "mock_fallback": not available,
+        "init_error": init_error,
+        "real_ai_only": True,
     }
 
 

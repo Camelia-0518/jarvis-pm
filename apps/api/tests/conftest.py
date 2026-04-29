@@ -1,372 +1,395 @@
-"""Pytest fixtures and configuration for Jarvis PM Skill system tests.
+"""Pytest fixtures for Jarvis PM API tests
 
-This module provides shared fixtures and test data for all test modules.
+Provides:
+- Async in-memory SQLite database (isolated per test via fresh :memory: DB)
+- AsyncSession fixture for direct DB operations
+- AsyncClient fixture for HTTP API testing
+- Authenticated client fixture (single-user mode)
+- Sample data fixtures (user, project, prd)
 """
+
+import os
+import uuid
+from typing import AsyncGenerator
+
+# Patch bcrypt before passlib imports it — newer bcrypt (4.1+) rejects
+# passwords >72 bytes without explicit truncation, but passlib's internal
+# detection code passes a long test password. We truncate at the source.
+import bcrypt as _bcrypt_lib
+_original_bcrypt_hashpw = _bcrypt_lib.hashpw
+_original_bcrypt_checkpw = _bcrypt_lib.checkpw
+
+
+def _patched_hashpw(password: bytes, salt: bytes) -> bytes:
+    if isinstance(password, str):
+        password = password.encode("utf-8")
+    if len(password) > 72:
+        password = password[:72]
+    return _original_bcrypt_hashpw(password, salt)
+
+
+def _patched_checkpw(password: bytes, hashed_password: bytes) -> bool:
+    if isinstance(password, str):
+        password = password.encode("utf-8")
+    if len(password) > 72:
+        password = password[:72]
+    return _original_bcrypt_checkpw(password, hashed_password)
+
+
+_bcrypt_lib.hashpw = _patched_hashpw
+_bcrypt_lib.checkpw = _patched_checkpw
 
 import pytest
 import pytest_asyncio
-from typing import Dict, Any, List
-from unittest.mock import AsyncMock, MagicMock
+from httpx import AsyncClient, ASGITransport
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+from sqlalchemy.pool import StaticPool
+
+# =============================================================================
+# CRITICAL: Override settings and patch decorators BEFORE any app module imports.
+# =============================================================================
+
+# Use a shared-cache in-memory URI so multiple connections see the same DB.
+# aiosqlite requires the `uri=true` query parameter to parse URI filenames.
+_SHARED_MEMORY_URL = "sqlite+aiosqlite:///file:testdb?mode=memory&cache=shared&uri=true"
+
+os.environ["DATABASE_URL"] = _SHARED_MEMORY_URL
+os.environ["DATABASE_URL_SYNC"] = "sqlite:///:memory:"
+os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
+os.environ["SINGLE_USER_MODE"] = "true"
+os.environ["DEBUG"] = "true"
+os.environ["REDIS_URL"] = ""
+os.environ["KIMI_API_KEY"] = "test-dummy-key"
+os.environ["OPENAI_API_KEY"] = ""
+os.environ["ANTHROPIC_API_KEY"] = ""
+
+# Disable rate limiting BEFORE endpoint modules are imported and decorated.
+import app.core.rate_limit as _rate_limit_module
 
 
-# ==================== LLM Provider Fixtures ====================
-
-@pytest.fixture
-def mock_kimi_api_key():
-    """Fixture providing a mock Kimi API key."""
-    return "test-kimi-api-key-12345"
-
-
-@pytest.fixture
-def mock_openai_api_key():
-    """Fixture providing a mock OpenAI API key."""
-    return "test-openai-api-key-67890"
+def _no_op_rate_limit(requests=100, window=60, key_func=None):
+    """No-op rate limit decorator for tests."""
+    def decorator(func):
+        return func
+    return decorator
 
 
-@pytest.fixture
-def sample_prompt():
-    """Fixture providing a sample prompt for testing."""
-    return "Analyze the requirements for a medical slide lending platform."
+_rate_limit_module.rate_limit = _no_op_rate_limit
+
+# Now import app modules — they will pick up the overridden env vars.
+from app.main import app
+from app.core.database import Base, get_db, engine as _app_engine, AsyncSessionLocal as _app_async_session_local
+from app.core.cache import cache_manager
+from app.core.config import Settings
+from app.core.security import get_password_hash
+from app.models.user import User, UserRole
+from app.models.project import Project, ProjectStatus
+from app.models.prd import PRD, PRDStatus
+from app.models.template import Template
+from app.models.prd_annotation import PRDAnnotation, AnnotationStatus, AnnotationType
+from app.models.feedback import Feedback
+from app.models.persona import Persona
+from app.models.requirement import Requirement
+
+# Re-instantiate settings so the test values are reflected everywhere.
+import app.core.config as _config_module
+_config_module.settings = Settings()
+from app.core.config import settings
 
 
-@pytest.fixture
-def sample_medical_prompt():
-    """Fixture providing a sample medical-related prompt."""
-    return """
-    Design a system for patients to borrow pathology slides from the hospital
-    for external consultation. The system should handle slice lending requests,
-    track immunohistochemistry test results, and integrate with the existing HIS.
-    """
-
-
-# ==================== Medical Terminology Fixtures ====================
-
-@pytest.fixture
-def medical_terms_sample():
-    """Fixture providing sample medical terms for testing."""
-    return {
-        "切片借阅": {
-            "definition": "患者或第三方机构申请借阅医院病理科保存的组织切片进行会诊或检测",
-            "synonyms": ["玻片借阅", "病理切片外借", "切片外送"],
-            "related_terms": ["病理科", "会诊", "免疫组化", "HE染色", "蜡块"],
-            "context": "病理科业务流程",
-            "examples": ["患者需要借阅切片去外院会诊"]
-        },
-        "免疫组化": {
-            "definition": "免疫组织化学检测，利用抗原抗体反应检测组织中特定蛋白的表达",
-            "synonyms": ["IHC", "免疫染色", "免疫组织化学"],
-            "related_terms": ["病理诊断", "肿瘤标志物", "切片", "抗体"],
-            "context": "病理检测技术",
-            "examples": ["通过免疫组化检测HER2表达"]
-        }
-    }
-
-
-@pytest.fixture
-def sample_text_with_medical_terms():
-    """Fixture providing sample text containing medical terms."""
-    return """
-    患者申请借阅病理切片用于外院会诊，需要进行免疫组化检测。
-    病理科负责处理切片借阅申请，并出具HE染色报告。
-    """
-
-
-@pytest.fixture
-def sample_text_without_medical_terms():
-    """Fixture providing sample text without medical terms."""
-    return "This is a regular text about general software development."
-
-
-# ==================== Output Validator Fixtures ====================
-
-@pytest.fixture
-def valid_requirement_analysis_output():
-    """Fixture providing a valid requirement analysis output."""
-    return {
-        "productOneLiner": "A platform for patients to borrow medical slides",
-        "userPersona": {
-            "who": "Patients needing external consultation",
-            "painPoints": "Difficult to access their medical slides",
-            "currentSolutions": "Manual application at hospital",
-            "whyNewProduct": "Streamlined digital process"
-        },
-        "featureList": {
-            "p0": ["Online application", "Status tracking"],
-            "p1": ["Digital payment", "SMS notifications"],
-            "p2": ["Multi-language support"]
-        },
-        "userStories": [
-            {
-                "id": "1",
-                "role": "Patient",
-                "action": "apply for slide lending online",
-                "benefit": "save time and avoid hospital visits",
-                "priority": "high"
-            },
-            {
-                "id": "2",
-                "role": "Doctor",
-                "action": "review applications",
-                "benefit": "manage requests efficiently",
-                "priority": "medium"
-            }
-        ],
-        "successMetrics": {
-            "northStar": "User satisfaction score",
-            "metrics": [
-                {"name": "Application completion rate", "target": "95%", "timeFrame": "3 months"}
-            ]
-        }
-    }
-
-
-@pytest.fixture
-def invalid_requirement_analysis_output():
-    """Fixture providing an invalid requirement analysis output."""
-    return {
-        "productOneLiner": "Test product",
-        # Missing required fields
-        "featureList": {
-            "p0": "not a list",  # Wrong type
-            "p1": [],
-            "p2": []
-        }
-    }
-
-
-@pytest.fixture
-def valid_prd_output():
-    """Fixture providing a valid PRD output."""
-    return {
-        "title": "Medical Slide Lending Platform PRD",
-        "version": "1.0",
-        "sections": [
-            {
-                "title": "Overview",
-                "content": "Platform for patients to borrow slides",
-                "priority": "high"
-            },
-            {
-                "title": "Requirements",
-                "content": "Detailed requirements here",
-                "priority": "normal"
-            }
-        ],
-        "markdown": "# Medical Slide Lending Platform PRD\n\n## Overview\nPlatform for patients to borrow slides"
-    }
-
-
-@pytest.fixture
-def valid_business_model_output():
-    """Fixture providing a valid business model output."""
-    return {
-        "valueProposition": "Streamlined slide lending process",
-        "targetCustomer": "Hospitals and patients",
-        "revenueStreams": [
-            {"name": "Subscription", "description": "Monthly fee", "pricing": "$99/month"}
-        ],
-        "costStructure": ["Development", "Hosting", "Support"],
-        "keyMetrics": ["User growth", "Retention rate"]
-    }
-
-
-@pytest.fixture
-def valid_tech_architecture_output():
-    """Fixture providing a valid tech architecture output."""
-    return {
-        "overview": "Microservices architecture",
-        "techStack": "Python FastAPI, PostgreSQL, Redis",
-        "components": [
-            {
-                "name": "API Gateway",
-                "description": "Entry point for all requests",
-                "techStack": ["Nginx", "FastAPI"],
-                "responsibilities": ["Routing", "Authentication"]
-            }
-        ],
-        "dataFlow": "Client -> API Gateway -> Services",
-        "deployment": "Docker containers on Kubernetes",
-        "security": "JWT authentication, HTTPS"
-    }
-
-
-@pytest.fixture
-def valid_milestone_plan_output():
-    """Fixture providing a valid milestone plan output."""
-    return {
-        "phases": [
-            {
-                "name": "Phase 1: MVP",
-                "duration": "2 months",
-                "startDate": "2024-01-01",
-                "endDate": "2024-03-01",
-                "deliverables": ["Core features", "Basic UI"],
-                "resources": ["2 developers", "1 designer"]
-            }
-        ],
-        "totalDuration": "6 months",
-        "criticalPath": ["Backend API", "Database setup"],
-        "risks": [{"risk": "Technical complexity", "mitigation": "Hire senior developer"}]
-    }
-
-
-@pytest.fixture
-def valid_medical_review_output():
-    """Fixture providing a valid medical review output."""
-    return {
-        "summary": "The design is medically sound",
-        "medicalRationality": {
-            "score": 85,
-            "assessment": "Good alignment with clinical workflow",
-            "concerns": ["Data privacy needs attention"],
-            "recommendations": ["Add audit logging"]
-        },
-        "complianceAnalysis": {
-            "applicableRegulations": ["HIPAA", "等保三级"],
-            "complianceStatus": "compliant",
-            "gaps": [],
-            "actions": []
-        },
-        "riskAssessment": [
-            {"risk": "Data breach", "level": "medium", "impact": "High", "mitigation": "Encryption"}
-        ],
-        "approvalRecommendation": "approve"
-    }
-
-
-@pytest.fixture
-def valid_compliance_check_output():
-    """Fixture providing a valid compliance check output."""
-    return {
-        "summary": "Overall compliance is good",
-        "overallStatus": "pass",
-        "score": 85,
-        "categories": [
-            {
-                "name": "Authentication",
-                "status": "pass",
-                "items": [
-                    {"requirement": "Multi-factor auth", "status": "pass"}
-                ]
-            }
-        ],
-        "criticalIssues": [],
-        "recommendations": ["Regular security audits"],
-        "checklist": [
-            {"item": "Data encryption", "checked": True, "category": "Security"}
-        ]
-    }
-
-
-# ==================== Skill Processor Fixtures ====================
-
-@pytest.fixture
-def sample_skill_inputs():
-    """Fixture providing sample inputs for various skills."""
-    return {
-        "requirement-analysis": {
-            "idea": "A platform for patients to borrow medical slides",
-            "targetUsers": "Patients needing external consultation",
-            "industry": "medical",
-            "constraints": "Must comply with HIPAA"
-        },
-        "write-prd": {
-            "requirementAnalysis": '{"productOneLiner": "Test product"}',
-            "template": "standard",
-            "detailLevel": "detailed"
-        },
-        "tech-architecture": {
-            "prd": "PRD content here",
-            "scalability": "medium",
-            "techStackPreference": "Python, FastAPI"
-        },
-        "business-model": {
-            "productDescription": "Medical slide lending platform",
-            "market": "Healthcare IT",
-            "competitors": "Traditional hospital systems"
-        },
-        "milestone-plan": {
-            "prd": "PRD content",
-            "teamSize": "5",
-            "architecture": "Microservices"
-        },
-        "medical-review": {
-            "requirement": "Design for slide lending system",
-            "featureType": "clinical_workflow",
-            "patientData": True
-        },
-        "compliance-check": {
-            "prd": "PRD with security features",
-            "complianceLevel": "level3"
-        }
-    }
-
-
-@pytest.fixture
-def mock_llm_response():
-    """Fixture providing a mock LLM response."""
-    return '''```json
-{
-    "result": "success",
-    "data": {
-        "productOneLiner": "Test product",
-        "userPersona": {
-            "who": "Test user",
-            "painPoints": "Test pain point",
-            "currentSolutions": "Current solution",
-            "whyNewProduct": "Why new"
-        },
-        "featureList": {
-            "p0": ["Feature 1"],
-            "p1": [],
-            "p2": []
-        },
-        "userStories": [],
-        "successMetrics": {}
-    }
-}
-```'''
-
-
-@pytest.fixture
-def mock_llm_response_invalid_json():
-    """Fixture providing an invalid JSON LLM response."""
-    return "This is not valid JSON"
-
-
-@pytest.fixture
-def mock_cache_manager():
-    """Fixture providing a mocked cache manager."""
-    mock = MagicMock()
-    mock.get = AsyncMock(return_value=None)
-    mock.set = AsyncMock(return_value=True)
-    mock.delete = AsyncMock(return_value=True)
-    return mock
-
-
-# ==================== Test Configuration ====================
-
-def pytest_configure(config):
-    """Configure pytest with custom markers."""
-    config.addinivalue_line("markers", "llm: marks tests that interact with LLM providers")
-    config.addinivalue_line("markers", "medical: marks tests related to medical terminology")
-    config.addinivalue_line("markers", "validation: marks tests for output validation")
-    config.addinivalue_line("markers", "skill: marks tests for skill processing")
-    config.addinivalue_line("markers", "async_test: marks async tests")
-
-
-# ==================== Async Fixtures ====================
+# ============== Database per test (shared-cache in-memory SQLite) ==============
 
 @pytest_asyncio.fixture
-async def async_mock_provider():
-    """Fixture providing an async mock LLM provider."""
-    from app.services.llm_provider import MockProvider
-    return MockProvider()
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Provide an isolated async database session per test.
+
+    Each test gets its own in-memory SQLite database.  We use a
+    shared-cache URI (mode=memory&cache=shared) so that the single
+    connection held open by the engine and any additional connections
+    opened by ``get_db()`` all see the same database contents.
+    """
+    # Generate a unique DB name per test so tests are fully isolated.
+    db_name = f"test_{uuid.uuid4().hex}"
+    db_url = (
+        f"sqlite+aiosqlite:///file:{db_name}?mode=memory&cache=shared&uri=true"
+    )
+
+    test_engine = create_async_engine(
+        db_url,
+        echo=False,
+        poolclass=StaticPool,
+        connect_args={"check_same_thread": False},
+        future=True,
+    )
+
+    TestAsyncSessionLocal = async_sessionmaker(
+        test_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
+    )
+
+    # Create all tables
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    # Monkey-patch the app's module-level globals so that get_db()
+    # (which references AsyncSessionLocal) and lifespan init_db()
+    # both use this test database.
+    import app.core.database as _db_module
+    original_engine = _db_module.engine
+    original_async_session_local = _db_module.AsyncSessionLocal
+    _db_module.engine = test_engine
+    _db_module.AsyncSessionLocal = TestAsyncSessionLocal
+
+    session = TestAsyncSessionLocal()
+
+    # Override the app's get_db to yield our session
+    async def override_get_db():
+        try:
+            yield session
+        finally:
+            pass
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    # Ensure single-user mode for tests
+    original_single_user = settings.SINGLE_USER_MODE
+    settings.SINGLE_USER_MODE = True
+
+    try:
+        yield session
+    finally:
+        settings.SINGLE_USER_MODE = original_single_user
+        app.dependency_overrides.pop(get_db, None)
+        await session.close()
+        # Restore original engine
+        _db_module.engine = original_engine
+        _db_module.AsyncSessionLocal = original_async_session_local
+        await test_engine.dispose()
+
+
+# ============== HTTP Client ==============
+
+@pytest_asyncio.fixture
+async def async_client(db_session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    """Provide an httpx AsyncClient for the FastAPI app."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
 
 
 @pytest_asyncio.fixture
-async def skill_processor_with_mock():
-    """Fixture providing a skill processor with mock provider."""
-    from app.services.skill_processor_enhanced import SkillProcessorEnhanced
-    processor = SkillProcessorEnhanced(llm_provider="mock", enable_cache=False)
-    return processor
+async def authenticated_client(async_client: AsyncClient) -> AsyncClient:
+    """Provide an authenticated AsyncClient.
+
+    In single-user mode, no JWT token is required — the endpoint
+    returns 'single-user' automatically. This fixture exists for
+    explicit token-based testing if needed.
+    """
+    # Single-user mode: auth is automatic, but we can set a header
+    # if we want to test the token path explicitly.
+    return async_client
+
+
+# ============== Global Mocks ==============
+
+@pytest.fixture(autouse=True)
+def mock_memory_indexer(monkeypatch):
+    """Globally mock memory_indexer to avoid loading sentence-transformers."""
+    class _FakeIndexer:
+        async def index_document(self, *args, **kwargs):
+            return 0
+
+        async def delete_document_index(self, *args, **kwargs):
+            return None
+
+        async def semantic_search(self, *args, **kwargs):
+            return []
+
+    import app.services.memory_indexer as _mi_mod
+    monkeypatch.setattr(_mi_mod, "memory_indexer", _FakeIndexer())
+
+
+# ============== Sample Data Fixtures ==============
+
+# User ID that matches single-user mode auth
+SINGLE_USER_ID = "single-user"
+
+
+@pytest_asyncio.fixture
+async def sample_user(db_session: AsyncSession) -> User:
+    """Create and return a sample user with the single-user ID."""
+    user = User(
+        id=SINGLE_USER_ID,
+        email="test@example.com",
+        hashed_password=get_password_hash("testpassword123"),
+        name="Test User",
+        role=UserRole.ADMIN,
+        is_active=True,
+        preferences={},
+    )
+    db_session.add(user)
+    await db_session.commit()
+    await db_session.refresh(user)
+    return user
+
+
+@pytest_asyncio.fixture
+async def sample_project(db_session: AsyncSession, sample_user: User) -> Project:
+    """Create and return a sample project owned by the single user."""
+    project = Project(
+        id=str(uuid.uuid4()),
+        name="Test Project",
+        description="A project for testing",
+        industry="saas",
+        status=ProjectStatus.ACTIVE,
+        created_by=SINGLE_USER_ID,
+        settings={},
+    )
+    db_session.add(project)
+    await db_session.commit()
+    await db_session.refresh(project)
+    return project
+
+
+@pytest_asyncio.fixture
+async def sample_prd(db_session: AsyncSession, sample_project: Project, sample_user: User) -> PRD:
+    """Create and return a sample PRD belonging to sample_project."""
+    prd = PRD(
+        id=str(uuid.uuid4()),
+        project_id=sample_project.id,
+        title="Test PRD",
+        version="1.0",
+        status=PRDStatus.DRAFT,
+        content={"chapters": {}, "template": "default", "industry": "saas"},
+        markdown="# Test PRD",
+        ai_generated={"template": "default", "industry": "saas", "ai_generated": False},
+        created_by=SINGLE_USER_ID,
+    )
+    db_session.add(prd)
+    await db_session.commit()
+    await db_session.refresh(prd)
+    return prd
+
+
+@pytest_asyncio.fixture
+async def multiple_projects(db_session: AsyncSession, sample_user: User) -> list[Project]:
+    """Create multiple projects for pagination/filtering tests."""
+    projects = []
+    for i in range(5):
+        project = Project(
+            id=str(uuid.uuid4()),
+            name=f"Project {i + 1}",
+            description=f"Description for project {i + 1}",
+            industry="medical" if i % 2 == 0 else "saas",
+            status=ProjectStatus.ACTIVE if i < 4 else ProjectStatus.ARCHIVED,
+            created_by=SINGLE_USER_ID,
+            settings={},
+        )
+        db_session.add(project)
+        projects.append(project)
+    await db_session.commit()
+    for p in projects:
+        await db_session.refresh(p)
+    return projects
+
+
+@pytest_asyncio.fixture
+async def sample_template(db_session: AsyncSession) -> Template:
+    """Create and return a sample custom template."""
+    template = Template(
+        id=str(uuid.uuid4()),
+        name="Test Template",
+        description="A template for testing",
+        industry="saas",
+        chapters=["Chapter 1", "Chapter 2"],
+        icon="🧪",
+        color="bg-blue-500",
+        is_builtin=False,
+        created_by=SINGLE_USER_ID,
+    )
+    db_session.add(template)
+    await db_session.commit()
+    await db_session.refresh(template)
+    return template
+
+
+@pytest_asyncio.fixture
+async def sample_annotation(db_session: AsyncSession, sample_prd: PRD) -> PRDAnnotation:
+    """Create and return a sample PRD annotation."""
+    annotation = PRDAnnotation(
+        prd_id=sample_prd.id,
+        chapter_num="1",
+        chapter_title="Introduction",
+        line_index=5,
+        selected_text="sample text",
+        content="This is a test annotation",
+        annotation_type=AnnotationType.COMMENT,
+        status=AnnotationStatus.OPEN,
+        created_by=SINGLE_USER_ID,
+    )
+    db_session.add(annotation)
+    await db_session.commit()
+    await db_session.refresh(annotation)
+    return annotation
+
+
+@pytest_asyncio.fixture
+async def sample_feedback(db_session: AsyncSession) -> Feedback:
+    """Create and return a sample feedback entry."""
+    fb = Feedback(
+        user_id=SINGLE_USER_ID,
+        category="bug",
+        content="Something is broken",
+        rating=3,
+        context="workspace page",
+    )
+    db_session.add(fb)
+    await db_session.commit()
+    await db_session.refresh(fb)
+    return fb
+
+
+@pytest_asyncio.fixture
+async def sample_persona(db_session: AsyncSession, sample_project: Project) -> Persona:
+    """Create and return a sample persona."""
+    p = Persona(
+        project_id=sample_project.id,
+        created_by=SINGLE_USER_ID,
+        name="门诊医生",
+        role="医生",
+        description="三甲医院门诊医生",
+        pain_points="系统切换频繁",
+        goals="提高工作效率",
+        scenarios="门诊接诊",
+        demographics="30-50岁",
+    )
+    db_session.add(p)
+    await db_session.commit()
+    await db_session.refresh(p)
+    return p
+
+
+@pytest_asyncio.fixture
+async def sample_requirement(db_session: AsyncSession, sample_project: Project) -> Requirement:
+    """Create and return a sample requirement."""
+    r = Requirement(
+        project_id=sample_project.id,
+        created_by=SINGLE_USER_ID,
+        title="用户登录功能",
+        description="支持手机号验证码登录",
+        status="backlog",
+        priority="p1",
+        rice_reach=100,
+        rice_impact=3.0,
+        rice_confidence=80,
+        rice_effort=2.0,
+        rice_score=120.0,
+        kano_category="must_be",
+    )
+    db_session.add(r)
+    await db_session.commit()
+    await db_session.refresh(r)
+    return r

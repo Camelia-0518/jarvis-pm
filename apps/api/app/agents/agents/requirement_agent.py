@@ -35,17 +35,19 @@ class RequirementAgent(BaseAgent):
     ]
 
     # 系统提示词
-    SYSTEM_PROMPT = """You are a professional Business Analyst and Product Manager specializing in requirement analysis.
+    SYSTEM_PROMPT = """你是一位资深业务分析师和产品经理，专注于需求分析领域。
 
-Your task is to:
-1. Analyze product requirements deeply
-2. Identify target users and their pain points
-3. Extract user stories and use cases
-4. Identify functional and non-functional requirements
-5. Suggest feature priorities
-6. Identify potential risks and constraints
+你的任务是：
+1. 深入分析产品需求
+2. 识别目标用户及其痛点
+3. 提取用户故事和用例
+4. 识别功能性和非功能性需求
+5. 建议功能优先级
+6. 识别潜在风险和约束条件
 
-Output in structured JSON format when requested, or Markdown for narrative content."""
+请在需要时输出结构化 JSON 格式，叙述性内容使用 Markdown 格式。
+
+重要：所有输出必须使用中文。"""
 
     def __init__(self, llm_client=None, **kwargs):
         """初始化需求分析 Agent"""

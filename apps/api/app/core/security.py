@@ -41,6 +41,15 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     return encoded_jwt
 
 
+def create_refresh_token(data: dict) -> str:
+    """Create JWT refresh token with longer expiry"""
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(days=30)
+    to_encode.update({"exp": expire, "type": "refresh"})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm="HS256")
+    return encoded_jwt
+
+
 def decode_token(token: str) -> Optional[dict]:
     """Decode JWT token"""
     try:
@@ -52,13 +61,13 @@ def decode_token(token: str) -> Optional[dict]:
 
 async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """Get current user ID from token. Returns a default user when no token is provided."""
-    # Single-user mode: no login required
+    # Single-user mode: no login required (development only)
     if credentials is None:
         if settings.SINGLE_USER_MODE:
             return "single-user"
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
+            detail="Authentication required",
             headers={"WWW-Authenticate": "Bearer"},
         )
 

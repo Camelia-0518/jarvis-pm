@@ -159,7 +159,7 @@ async def collaboration_websocket(
     }, exclude=websocket)
 
     # Heartbeat/ping-pong
-    ping_interval = 30  # seconds
+    ping_interval = 10  # seconds
     last_pong = asyncio.get_event_loop().time()
 
     async def heartbeat():

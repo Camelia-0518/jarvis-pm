@@ -28,7 +28,7 @@ else:
         max_overflow=10,           # Max overflow connections
         pool_pre_ping=True,        # Verify connections before using
         pool_recycle=3600,         # Recycle connections after 1 hour
-        pool_timeout=30,           # Timeout for getting connection from pool
+        pool_timeout=60,           # Timeout for getting connection from pool
     )
 
 # Create async session factory
@@ -75,11 +75,40 @@ async def init_db():
         PRD,
         SkillExecution,
         Battle,
+        MemoryEntry,
+        Feedback,
+        PRDVersion,
+        PRDAnnotation,
+        MemoryChunk,
+        Persona,
+        Competitor,
+        Template,
+        PromptTemplate,
     )
+    from app.api.v1.endpoints.templates import seed_builtin_templates
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables initialized")
+
+    # Seed builtin templates
+    async with AsyncSessionLocal() as session:
+        try:
+            await seed_builtin_templates(session)
+            logger.info("Builtin templates seeded")
+        except Exception as e:
+            logger.warning(f"Failed to seed builtin templates: {e}")
+            await session.rollback()
+
+    # Seed builtin prompts
+    from app.services.prompt_migration import seed_builtin_prompts
+    async with AsyncSessionLocal() as session:
+        try:
+            await seed_builtin_prompts(session)
+            logger.info("Builtin prompts seeded")
+        except Exception as e:
+            logger.warning(f"Failed to seed builtin prompts: {e}")
+            await session.rollback()
 
 
 async def close_db():
@@ -152,6 +181,43 @@ INDEX_DEFINITIONS = {
     "idx_skill_executions_created_at": "CREATE INDEX IF NOT EXISTS idx_skill_executions_created_at ON skill_executions(created_at)",
     "idx_skill_executions_success": "CREATE INDEX IF NOT EXISTS idx_skill_executions_success ON skill_executions(success)",
     "idx_skill_executions_project_created": "CREATE INDEX IF NOT EXISTS idx_skill_executions_project_created ON skill_executions(project_id, created_at)",
+
+    # Memory chunk indexes
+    "idx_memory_chunks_source": "CREATE INDEX IF NOT EXISTS idx_memory_chunks_source ON memory_chunks(source_type, source_id)",
+    "idx_memory_chunks_created": "CREATE INDEX IF NOT EXISTS idx_memory_chunks_created ON memory_chunks(created_at)",
+
+    # Feedback indexes
+    "idx_feedback_user_id": "CREATE INDEX IF NOT EXISTS idx_feedback_user_id ON feedback(user_id)",
+    "idx_feedback_category": "CREATE INDEX IF NOT EXISTS idx_feedback_category ON feedback(category)",
+    "idx_feedback_created_at": "CREATE INDEX IF NOT EXISTS idx_feedback_created_at ON feedback(created_at DESC)",
+
+    # PRD version indexes
+    "idx_prd_versions_prd_id": "CREATE INDEX IF NOT EXISTS idx_prd_versions_prd_id ON prd_versions(prd_id)",
+    "idx_prd_versions_created_by": "CREATE INDEX IF NOT EXISTS idx_prd_versions_created_by ON prd_versions(created_by)",
+
+    # Persona indexes
+    "idx_personas_created_by": "CREATE INDEX IF NOT EXISTS idx_personas_created_by ON personas(created_by)",
+
+    # Competitor indexes
+    "idx_competitors_created_by": "CREATE INDEX IF NOT EXISTS idx_competitors_created_by ON competitors(created_by)",
+
+    # Requirement indexes
+    "idx_requirements_created_by": "CREATE INDEX IF NOT EXISTS idx_requirements_created_by ON requirements(created_by)",
+    "idx_requirements_status": "CREATE INDEX IF NOT EXISTS idx_requirements_status ON requirements(status)",
+
+    # Battle indexes
+    "idx_battles_project_id": "CREATE INDEX IF NOT EXISTS idx_battles_project_id ON battles(project_id)",
+    "idx_battles_prd_id": "CREATE INDEX IF NOT EXISTS idx_battles_prd_id ON battles(prd_id)",
+    "idx_battles_created_by": "CREATE INDEX IF NOT EXISTS idx_battles_created_by ON battles(created_by)",
+
+    # Composite indexes for common query patterns
+    "idx_prds_project_status": "CREATE INDEX IF NOT EXISTS idx_prds_project_status ON prds(project_id, status)",
+    "idx_projects_status_created": "CREATE INDEX IF NOT EXISTS idx_projects_status_created ON projects(status, created_at DESC)",
+
+    # Prompt template indexes
+    "idx_prompt_templates_name": "CREATE INDEX IF NOT EXISTS idx_prompt_templates_name ON prompt_templates(name)",
+    "idx_prompt_templates_active": "CREATE INDEX IF NOT EXISTS idx_prompt_templates_active ON prompt_templates(is_active)",
+    "idx_prompt_templates_name_version": "CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_templates_name_version ON prompt_templates(name, version)",
 }
 
 

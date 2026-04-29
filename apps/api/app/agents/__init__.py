@@ -23,7 +23,6 @@ from .llm_client import (
     OpenAIHTTPClient,
     AnthropicHTTPClient,
     FallbackLLMClient,
-    MockLLMClient,
     LLMClientFactory,
     create_default_client,
 )
@@ -40,7 +39,6 @@ __all__ = [
     'OpenAIHTTPClient',
     'AnthropicHTTPClient',
     'FallbackLLMClient',
-    'MockLLMClient',
     'LLMClientFactory',
     'create_default_client',
     'AgentRegistry',

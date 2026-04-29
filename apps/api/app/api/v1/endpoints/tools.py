@@ -1,8 +1,11 @@
 """Tools endpoints - all wired to real AI generation"""
 
 import time
+import hashlib
 from typing import Optional, List
+import json
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,10 +20,39 @@ from app.services.data_analysis_upload_service import analyze_uploaded_data
 
 router = APIRouter()
 
+# Simple in-memory cache for tool results (key: hash of prompt, value: content)
+_tool_cache: dict[str, tuple[str, float]] = {}
+_CACHE_TTL = 3600  # 1 hour
+
+
+def _cache_key(prompt: str) -> str:
+    return hashlib.md5(prompt.encode("utf-8")).hexdigest()
+
+
+def _get_cached(prompt: str) -> Optional[str]:
+    key = _cache_key(prompt)
+    if key in _tool_cache:
+        content, ts = _tool_cache[key]
+        if time.time() - ts < _CACHE_TTL:
+            return content
+        del _tool_cache[key]
+    return None
+
+
+def _set_cached(prompt: str, content: str) -> None:
+    _tool_cache[_cache_key(prompt)] = (content, time.time())
+
 
 def _user_data(content: str) -> str:
     """Wrap untrusted user content to mitigate prompt injection."""
     return f"<user_data>\n{content}\n</user_data>"
+
+
+# Shared concise data-source notice (replaces verbose per-tool blocks)
+_DATA_SOURCE_NOTICE = (
+    "> 数据来源声明：本内容为AI基于行业经验和通用模板生成，仅供参考。"
+    "涉及具体数字、法规、竞品数据时需人工核实。"
+)
 
 
 class UserResearchRequest(BaseModel):
@@ -36,6 +68,7 @@ class CompetitorAnalysisRequest(BaseModel):
     project_id: str
     competitors: List[str]
     analysis_dimensions: Optional[List[str]] = None
+    confirmed_candidates: Optional[List[dict]] = None  # 用户确认的候选竞品
 
 
 class DataAnalysisRequest(BaseModel):
@@ -82,20 +115,16 @@ async def user_research(
 问题列表: {_user_data(str(data.questions or ['无特定问题']))}
 
 要求：
-1. 输出包含研究发现(findings)、关键洞察(insights)、行动建议(recommendations)
+1. 输出研究发现、关键洞察、行动建议
 2. 使用 Markdown 格式，结构清晰
-3. 内容具体、可操作
-4. 在输出最开头必须包含以下数据来源声明（Markdown 格式）：
----
-数据来源声明
-- 内容类型：[请选择：行业经验分析 / 通用模板 / 基于上传数据 / AI推测]
-- 可信度等级：[请选择：高 / 中 / 低]
-- 使用建议：[请选择：可直接使用框架 / 需人工核实具体数字 / 需补充真实数据]
----
+3. 禁止编造具体数字、人名、医院名称、百分比
 
-警告：如果没有任何真实访谈数据支撑，禁止编造具体的访谈人数、医院名称、用户原话、数字指标、百分比或日期。"""
+{_DATA_SOURCE_NOTICE}"""
 
-    content = await ai_service.chat(prompt)
+    content = _get_cached(prompt)
+    if content is None:
+        content = await ai_service.chat(prompt, {"max_tokens": 2000})
+        _set_cached(prompt, content)
 
     return ResponseBuilder.success({
         "id": f"research_{int(time.time())}",
@@ -115,11 +144,19 @@ async def competitor_analysis(
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db)
 ):
-    """Analyze competitors using AI"""
-    crawler_results = await web_crawler_service.search_competitor_info(data.competitors)
+    """Analyze competitors using AI (with candidate confirmation mode)"""
+    # 获取项目信息
+    from app.models.project import Project
+    project_result = await db.execute(select(Project).where(Project.id == data.project_id))
+    project = project_result.scalar_one_or_none()
+    industry = project.industry if project else "其他"
 
-    crawler_section = ""
-    if any(r.get("success") for r in crawler_results.get("results", [])):
+    # 步骤1：尝试网页抓取
+    crawler_results = await web_crawler_service.search_competitor_info(data.competitors)
+    has_crawler_success = any(r.get("success") for r in crawler_results.get("results", []))
+
+    # 步骤2：如果爬虫有结果，直接生成报告
+    if has_crawler_success:
         formatted_results = []
         for r in crawler_results.get("results", []):
             if r.get("success"):
@@ -139,7 +176,7 @@ async def competitor_analysis(
             + "\n\n注意：以上信息来自公开网页抓取，请在分析中标注信息来源。"
         )
 
-    prompt = f"""为以下项目生成竞品分析报告：
+        prompt = f"""为以下项目生成竞品分析报告：
 
 项目ID: {data.project_id}
 竞品列表: {_user_data(', '.join(data.competitors))}
@@ -147,25 +184,183 @@ async def competitor_analysis(
 {crawler_section}
 
 要求：
-1. 输出包含对比矩阵(comparison_matrix)、差异化机会(differentiation_opportunities)
+1. 输出对比矩阵和差异化机会
 2. 使用 Markdown 格式，包含表格
-3. 给出具体的竞争策略建议
-4. 在输出最开头必须包含以下数据来源声明（Markdown 格式）：
----
-数据来源声明
-- 内容类型：[请选择：行业经验分析 / 通用模板 / 基于网页抓取 / AI推测]
-- 可信度等级：[请选择：高 / 中 / 低]
-- 使用建议：[请选择：可直接使用框架 / 需人工核实具体数字 / 需补充真实数据]
+3. 给出竞争策略建议
+4. 禁止编造具体评分、市场份额、财务数字
+
+{_DATA_SOURCE_NOTICE}"""
+
+        content = _get_cached(prompt)
+        if content is None:
+            content = await ai_service.chat(prompt, {"max_tokens": 2000})
+            _set_cached(prompt, content)
+
+        return ResponseBuilder.success({
+            "id": f"analysis_{int(time.time())}",
+            "project_id": data.project_id,
+            "needs_confirmation": False,
+            "competitors": [{"name": c, "score": 7.5} for c in data.competitors],
+            "comparison_matrix": {"raw": content[:800]},
+            "differentiation_opportunities": [line.strip("- ").strip() for line in content.split("\n") if line.strip().startswith("-")][:5] or ["聚焦垂直场景", "优化服务体验"],
+            "markdown": content,
+        })
+
+    # 步骤3：爬虫无结果 -> 进入候选确认模式
+    # 使用 LLM 推断候选竞品
+    candidate_prompt = f"""请基于你的产品知识，为以下项目推断主要竞品：
+
+产品/项目: {', '.join(data.competitors)}
+行业: {industry}
+
+要求：
+1. 列出 2-4 个真实或代表性的竞品
+2. 对每个竞品提供：名称、定位描述
+3. 不要编造虚假 URL
+4. 以 JSON 数组返回
+
+格式：[{{"name": "名称", "description": "描述", "source_detail": "推断来源说明"}}]"""
+
+    candidates = []
+    try:
+        candidate_response = await ai_service.chat(candidate_prompt, {"max_tokens": 1000})
+        parsed = json.loads(candidate_response)
+        if isinstance(parsed, list):
+            candidates = parsed
+        elif isinstance(parsed, dict) and "competitors" in parsed:
+            candidates = parsed["competitors"]
+    except Exception:
+        pass
+
+    if not candidates:
+        # LLM 也失败，返回空结果
+        return ResponseBuilder.error(
+            code="NO_DATA",
+            message="网络搜索和 AI 推断均未找到竞品信息，请手动输入竞品名称后重试。"
+        )
+
+    # 生成候选预览
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    preview = f"""# 竞品分析 — 候选确认
+
+> ⏳ **等待用户确认**：网络搜索未返回结果，以下竞品由 AI 基于知识库推断生成。
+> 请勾选确认准确的竞品后，系统将生成正式分析报告。
+
 ---
 
-警告：如果没有任何真实市场调研数据支撑，禁止编造具体的竞品评分、市场份额、用户评价、财务数字或发布时间。"""
+## 分析对象
 
-    content = await ai_service.chat(prompt)
+- **产品**: {', '.join(data.competitors)}
+- **行业**: {industry}
+- **时间**: {timestamp}
+
+## 候选竞品（请确认）
+
+"""
+    for i, c in enumerate(candidates, 1):
+        preview += f"""### {i}. {c.get('name', 'Unknown')}
+
+**描述**: {c.get('description', '暂无描述')}
+
+**推断来源**: {c.get('source_detail', 'AI知识库推断')}
+
+**建议操作**: □ 确认纳入分析  /  □ 排除
+
+---
+
+"""
+
+    preview += """## 下一步
+
+请确认以上候选竞品后，系统将继续生成完整分析报告。
+
+---
+"""
 
     return ResponseBuilder.success({
         "id": f"analysis_{int(time.time())}",
         "project_id": data.project_id,
-        "competitors": [{"name": c, "score": 7.5} for c in data.competitors],
+        "needs_confirmation": True,
+        "candidates": candidates,
+        "verified": [],
+        "markdown": preview,
+    })
+
+
+@router.post("/competitors/confirm", response_model=dict)
+@rate_limit(requests=10, window=60)
+async def confirm_competitor_analysis(
+    data: CompetitorAnalysisRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """用户确认候选竞品后，生成正式竞品分析报告"""
+    confirmed = data.confirmed_candidates or []
+    if not confirmed:
+        return ResponseBuilder.error(code="NO_CANDIDATES", message="请至少确认一个竞品")
+
+    # 获取项目信息
+    from app.models.project import Project
+    project_result = await db.execute(select(Project).where(Project.id == data.project_id))
+    project = project_result.scalar_one_or_none()
+    industry = project.industry if project else "其他"
+
+    # 构建已确认竞品的详细分析
+    competitor_names = [c.get("name", "") for c in confirmed]
+    crawler_results = await web_crawler_service.search_competitor_info(competitor_names)
+
+    crawler_section = ""
+    if any(r.get("success") for r in crawler_results.get("results", [])):
+        formatted_results = []
+        for r in crawler_results.get("results", []):
+            if r.get("success"):
+                formatted_results.append(
+                    f"- {r['name']} ({r['url']})\n"
+                    f"  标题: {r['title'] or 'N/A'}\n"
+                    f"  描述: {r['description'] or 'N/A'}\n"
+                    f"  内容摘要: {r['content'] or 'N/A'}"
+                )
+        if formatted_results:
+            crawler_section = (
+                "\n\n[网页抓取到的竞品信息]\n"
+                + "\n".join(formatted_results)
+                + "\n\n注意：以上信息来自公开网页抓取，请在分析中标注信息来源。"
+            )
+
+    # 补充候选竞品的描述信息
+    candidate_section = "\n\n[用户确认的竞品信息]\n"
+    for c in confirmed:
+        candidate_section += f"- {c.get('name', 'Unknown')}: {c.get('description', '暂无描述')}\n"
+
+    prompt = f"""为以下项目生成正式竞品分析报告：
+
+项目ID: {data.project_id}
+行业: {industry}
+已确认竞品: {_user_data(', '.join(competitor_names))}
+分析维度: {_user_data(', '.join(data.analysis_dimensions or ['功能', '价格', '用户体验', '市场定位']))}
+{crawler_section}
+{candidate_section}
+
+要求：
+1. 输出对比矩阵和差异化机会
+2. 使用 Markdown 格式，包含表格
+3. 给出竞争策略建议
+4. 禁止编造具体评分、市场份额、财务数字
+5. 报告开头标注："本报告基于用户确认的竞品数据生成"
+
+{_DATA_SOURCE_NOTICE}"""
+
+    content = _get_cached(prompt)
+    if content is None:
+        content = await ai_service.chat(prompt, {"max_tokens": 2000})
+        _set_cached(prompt, content)
+
+    return ResponseBuilder.success({
+        "id": f"analysis_{int(time.time())}",
+        "project_id": data.project_id,
+        "needs_confirmation": False,
+        "confirmed": True,
+        "competitors": [{"name": c.get("name", ""), "score": 7.5} for c in confirmed],
         "comparison_matrix": {"raw": content[:800]},
         "differentiation_opportunities": [line.strip("- ").strip() for line in content.split("\n") if line.strip().startswith("-")][:5] or ["聚焦垂直场景", "优化服务体验"],
         "markdown": content,
@@ -180,7 +375,7 @@ async def data_analysis(
     db: AsyncSession = Depends(get_db)
 ):
     """Analyze data using AI"""
-    prompt = f"""为以下项目生成数据分析报告：
+    prompt = f"""为以下项目生成数据分析报告框架：
 
 项目ID: {data.project_id}
 数据源: {_user_data(data.data_source)}
@@ -188,20 +383,16 @@ async def data_analysis(
 时间范围: {_user_data(data.time_range or '最近30天')}
 
 要求：
-1. 输出包含摘要(summary)、趋势(trends)、异常(anomalies)、建议(recommendations)
+1. 输出分析框架、指标定义、假设性分析思路
 2. 使用 Markdown 格式
-3. 给出可落地的数据驱动建议
-4. 在输出最开头必须包含以下数据来源声明（Markdown 格式）：
----
-数据来源声明
-- 内容类型：[请选择：基于真实数据 / 行业经验分析 / AI推测]
-- 可信度等级：[请选择：高 / 中 / 低]
-- 使用建议：[请选择：可直接用于决策 / 需人工核实 / 需补充真实数据]
----
+3. 禁止输出具体数字、百分比、日期（系统未接入真实数据）
 
-**严格警告：当前系统未接入真实业务数据库。如果你没有任何真实数据支撑，你只能输出分析框架、指标定义和假设性分析思路，绝对禁止输出任何具体的数字、百分比、日期或趋势结论。"""
+{_DATA_SOURCE_NOTICE}"""
 
-    content = await ai_service.chat(prompt)
+    content = _get_cached(prompt)
+    if content is None:
+        content = await ai_service.chat(prompt, {"max_tokens": 2000})
+        _set_cached(prompt, content)
 
     return ResponseBuilder.success({
         "id": f"data_{int(time.time())}",
@@ -258,19 +449,16 @@ async def stakeholder_analysis(
 
 要求：
 1. 识别关键干系人及其影响力/利益度
-2. 输出沟通计划(communication_plan)
+2. 输出沟通计划
 3. 使用 Markdown 格式，包含矩阵表格
-4. 在输出最开头必须包含以下数据来源声明（Markdown 格式）：
----
-数据来源声明
-- 内容类型：[请选择：行业经验分析 / 通用模板 / 基于上传数据 / AI推测]
-- 可信度等级：[请选择：高 / 中 / 低]
-- 使用建议：[请选择：可直接使用框架 / 需人工核实具体角色 / 需补充真实信息]
----
+4. 禁止编造具体人名、部门编制、决策流程细节
 
-警告：如果没有任何真实组织信息支撑，禁止编造具体的人名、部门编制、决策流程细节或权力关系。"""
+{_DATA_SOURCE_NOTICE}"""
 
-    content = await ai_service.chat(prompt)
+    content = _get_cached(prompt)
+    if content is None:
+        content = await ai_service.chat(prompt, {"max_tokens": 2000})
+        _set_cached(prompt, content)
 
     return ResponseBuilder.success({
         "id": f"stakeholder_{int(time.time())}",
@@ -326,20 +514,17 @@ PRD 内容：
 {_user_data(prd_markdown)}
 
 要求：
-1. 评审材料必须基于 PRD 的具体内容，引用实际的功能点、设计决策和数据指标
+1. 评审材料必须基于 PRD 的具体内容，引用实际的功能点和设计决策
 2. 不能输出通用模板或占位符
-3. 输出 Markdown 格式，结构清晰
-4. 在输出最开头必须包含以下数据来源声明（Markdown 格式）：
----
-数据来源声明
-- 内容类型：[请选择：基于已有PRD / 通用模板 / AI推测]
-- 可信度等级：[请选择：高 / 中 / 低]
-- 使用建议：[请选择：可直接用于评审 / 需人工核实关键数字 / 需补充真实数据]
----
+3. 使用 Markdown 格式，结构清晰
+4. 禁止编造 PRD 中不存在的具体数字、日期或指标
 
-严格警告：禁止编造PRD中不存在的具体数字、日期或指标。"""
+{_DATA_SOURCE_NOTICE}"""
 
-    content = await ai_service.chat(prompt)
+    content = _get_cached(prompt)
+    if content is None:
+        content = await ai_service.chat(prompt, {"max_tokens": 2000})
+        _set_cached(prompt, content)
 
     return ResponseBuilder.success({
         "id": f"review_{data.material_type}_{int(time.time())}",
@@ -349,6 +534,57 @@ PRD 内容：
         "content": {"raw": content},
         "markdown": content
     })
+
+
+@router.post("/review-materials-stream")
+async def review_materials_stream(
+    data: ReviewMaterialRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """Stream review materials generation using SSE"""
+    from app.models.prd import PRD
+
+    # Query PRD markdown from database
+    prd_markdown = None
+    if data.prd_id:
+        result = await db.execute(
+            select(PRD).where(PRD.id == data.prd_id, PRD.created_by == user_id)
+        )
+        prd = result.scalar_one_or_none()
+        prd_markdown = prd.markdown if prd else None
+    else:
+        result = await db.execute(
+            select(PRD)
+            .where(PRD.project_id == data.project_id, PRD.created_by == user_id)
+            .order_by(PRD.created_at.desc())
+        )
+        prd = result.scalars().first()
+        prd_markdown = prd.markdown if prd else None
+
+    async def event_generator():
+        full_markdown = ""
+        try:
+            async for chunk in ai_service.generate_review_material_stream(
+                prd_id=data.prd_id or data.project_id,
+                material_type=data.material_type,
+                prd_content=prd_markdown,
+            ):
+                full_markdown += chunk
+                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'markdown': full_markdown})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/prototype", response_model=dict)
@@ -366,20 +602,17 @@ async def prototype(
 原型类型: {data.prototype_type}
 
 要求：
-1. 输出关键页面列表(pages)和用户流程(user_flows)
+1. 输出关键页面列表和用户流程
 2. 使用 Markdown 格式
 3. 包含页面结构、核心交互、状态说明
-4. 在输出最开头必须包含以下数据来源声明（Markdown 格式）：
----
-数据来源声明
-- 内容类型：[请选择：通用设计模式 / 行业经验分析 / AI推测]
-- 可信度等级：[请选择：高 / 中 / 低]
-- 使用建议：[请选择：可直接参考 / 需结合实际业务调整 / 需用户验证]
----
+4. 禁止编造用户测试结论、点击率、转化率
 
-警告：如果没有任何真实用户研究支撑，禁止编造具体的用户测试结论、点击率、转化率或满意度数据。"""
+{_DATA_SOURCE_NOTICE}"""
 
-    content = await ai_service.chat(prompt)
+    content = _get_cached(prompt)
+    if content is None:
+        content = await ai_service.chat(prompt, {"max_tokens": 2000})
+        _set_cached(prompt, content)
 
     return ResponseBuilder.success({
         "id": f"prototype_{int(time.time())}",

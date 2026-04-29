@@ -11,6 +11,8 @@ import uuid
 import asyncio
 
 from app.services.skill_processor import skill_processor
+from app.services.skill_processor_enhanced import SkillProcessorEnhanced
+from app.core.config import settings
 from app.core.responses import ResponseBuilder
 from app.core.rate_limit import rate_limit
 from app.core.database import get_db
@@ -257,13 +259,17 @@ async def execute_skill(
                 detail=f"技能 {request.skillId} 不存在"
             )
 
-        # 执行技能
+        # 直接使用增强版处理器执行技能（确保真实AI调用，不使用mock缓存）
         start_time = datetime.now()
-        result = await skill_processor.execute_skill(
+        enhanced = SkillProcessorEnhanced(
+            llm_provider=settings.DEFAULT_AI_PROVIDER,
+            enable_cache=False
+        )
+        result = await enhanced.execute_skill(
             skill_id=request.skillId,
             inputs=request.inputs,
-            context=request.context,
-            options=request.options
+            context=request.context or {},
+            skip_cache=True
         )
         execution_time = int((datetime.now() - start_time).total_seconds() * 1000)
 

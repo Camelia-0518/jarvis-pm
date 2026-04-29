@@ -3,7 +3,7 @@
 from datetime import timedelta
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel, EmailStr, Field, validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -12,6 +12,7 @@ from app.core.security import (
     verify_password,
     get_password_hash,
     create_access_token,
+    create_refresh_token,
     get_current_user_id,
     decode_token,
 )
@@ -35,10 +36,14 @@ class UserRegisterRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=128)
     name: str = Field(..., min_length=2, max_length=50)
 
-    @validator('password')
+    @field_validator('password')
     def validate_password(cls, v):
         if len(v) < 8:
             raise ValueError('Password must be at least 8 characters')
+        # bcrypt silently truncates at 72 bytes; reject longer passwords
+        # to avoid the illusion of security
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError('Password must not exceed 72 bytes (bcrypt limit)')
         return v
 
 
@@ -90,11 +95,13 @@ async def register(
         details={"email": data.email}
     )
 
-    # Create token
+    # Create tokens
     token = create_access_token(data={"sub": user.id})
+    refresh = create_refresh_token(data={"sub": user.id})
 
     return ResponseBuilder.success({
         "access_token": token,
+        "refresh_token": refresh,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -139,11 +146,13 @@ async def login(
         details={"user_id": user.id, "email": user.email}
     )
 
-    # Create token
+    # Create tokens
     token = create_access_token(data={"sub": user.id})
+    refresh = create_refresh_token(data={"sub": user.id})
 
     return ResponseBuilder.success({
         "access_token": token,
+        "refresh_token": refresh,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -246,11 +255,13 @@ async def refresh_token(
     if not user or not user.is_active:
         raise AuthenticationError(message="User not found or inactive")
 
-    # Create new token
+    # Create new tokens
     new_token = create_access_token(data={"sub": user_id})
+    new_refresh = create_refresh_token(data={"sub": user_id})
 
     return ResponseBuilder.success({
         "access_token": new_token,
+        "refresh_token": new_refresh,
         "token_type": "bearer",
         "expires_in": 60 * 60 * 24 * 7  # 7 days
     })

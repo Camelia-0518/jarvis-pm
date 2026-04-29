@@ -103,8 +103,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3. GZip Compression
-app.add_middleware(GZipMiddleware, minimum_size=1000)
+# 3. GZip Compression — disabled to prevent SSE streaming buffering
+# app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 
@@ -178,16 +178,16 @@ async def health_check():
 @app.get("/health/llm", tags=["Health"])
 async def health_llm():
     """LLM provider health check"""
-    from app.agents.llm_client import LLMClientFactory, MockLLMClient
+    from app.agents.llm_client import LLMClientFactory
 
     available = settings.available_llm_providers
     default = settings.DEFAULT_AI_PROVIDER
 
-    # Check if default provider is usable
+    # Check if default provider is usable (real LLM client constructible without ValueError)
     try:
-        client = LLMClientFactory.create(default if default != "fallback" else "kimi")
-        default_usable = not isinstance(client, MockLLMClient)
-    except ValueError:
+        LLMClientFactory.create(default if default != "fallback" else "kimi")
+        default_usable = True
+    except (ValueError, RuntimeError):
         default_usable = False
 
     return {
@@ -195,7 +195,7 @@ async def health_llm():
         "default_provider": default,
         "default_provider_usable": default_usable,
         "available_providers": available,
-        "mock_fallback": not available,
+        "mock_fallback": False,
     }
 
 

@@ -46,60 +46,24 @@ class WebSearchTool(BaseTool):
         """
         执行搜索
 
+        注意：当前未配置真实搜索 API（如 SerpAPI、Google Custom Search）。
+        如需启用真实搜索，请在环境变量中配置 SEARCH_API_KEY。
+
         Args:
             query: 搜索关键词
             limit: 返回结果数量
 
         Returns:
-            ToolResult: 搜索结果
+            ToolResult: 搜索结果或错误提示
         """
-        try:
-            # 这里可以实现真实的搜索 API 调用
-            # 如 Google Custom Search API, Bing API, SerpAPI 等
-            # 现在使用模拟数据
-            results = await self._mock_search(query, limit)
-
-            return ToolResult.success_result(
-                output=f"找到 {len(results)} 条搜索结果",
-                data={
-                    "query": query,
-                    "total": len(results),
-                    "results": results
-                }
+        # TODO: 接入真实搜索 API（SERPAPI_KEY / GOOGLE_SEARCH_API_KEY 等）
+        return ToolResult.error_result(
+            error=(
+                "Web 搜索工具未配置真实搜索 API。"
+                "请在环境变量中设置 SEARCH_API_KEY 或 SERPAPI_KEY 以启用真实搜索。"
+                "当前系统依赖 LLM 的知识库进行推理，不通过网络搜索获取实时信息。"
             )
-
-        except Exception as e:
-            return ToolResult.error_result(
-                error=f"搜索失败: {str(e)}"
-            )
-
-    async def _mock_search(self, query: str, limit: int) -> List[Dict[str, Any]]:
-        """模拟搜索结果"""
-        # 根据查询生成模拟结果
-        encoded_query = urllib.parse.quote(query)
-
-        results = [
-            {
-                "title": f"{query} - 搜索结果 1",
-                "url": f"https://example.com/result1?q={encoded_query}",
-                "snippet": f"这是关于 {query} 的搜索结果摘要...",
-                "source": "Example Site"
-            },
-            {
-                "title": f"{query} - 相关介绍",
-                "url": f"https://example.com/result2?q={encoded_query}",
-                "snippet": f"了解更多关于 {query} 的信息...",
-                "source": "Reference Site"
-            },
-            {
-                "title": f"{query} 最佳实践",
-                "url": f"https://example.com/best-practices?q={encoded_query}",
-                "snippet": f"{query} 的最佳实践和案例分析...",
-                "source": "Tech Blog"
-            }
-        ]
-
-        return results[:limit]
+        )
 
 
 class WebCrawlerTool(BaseTool):
@@ -129,36 +93,16 @@ class WebCrawlerTool(BaseTool):
     ]
 
     async def execute(self, url: str, extract_text: bool = True) -> ToolResult:
-        """执行爬取"""
-        try:
-            # 这里可以实现真实的网页爬取
-            # 使用 requests, aiohttp, 或 playwright 等
-            # 现在使用模拟数据
+        """执行爬取
 
-            content = await self._mock_crawl(url, extract_text)
-
-            return ToolResult.success_result(
-                output=f"成功爬取网页: {url}",
-                data={
-                    "url": url,
-                    "title": content.get("title", ""),
-                    "content": content.get("text", "")[:2000] if extract_text else None,
-                    "links": content.get("links", [])[:10]
-                }
+        注意：当前未配置真实网页爬取服务。
+        如需启用，请配置爬取工具（如 Playwright、requests + BeautifulSoup 等）。
+        """
+        # TODO: 接入真实网页爬取服务
+        return ToolResult.error_result(
+            error=(
+                "网页爬取工具未配置真实爬取服务。"
+                "请部署 Playwright、requests 等爬取工具以启用此功能。"
+                "当前系统依赖 LLM 的知识库进行推理。"
             )
-
-        except Exception as e:
-            return ToolResult.error_result(
-                error=f"爬取失败: {str(e)}"
-            )
-
-    async def _mock_crawl(self, url: str, extract_text: bool) -> Dict[str, Any]:
-        """模拟爬取结果"""
-        return {
-            "title": "示例网页标题",
-            "text": f"这是从 {url} 爬取的示例内容。实际使用时需要接入真实的网页爬取服务，如使用 requests、BeautifulSoup、Playwright 等工具。",
-            "links": [
-                {"url": "https://example.com/link1", "text": "链接1"},
-                {"url": "https://example.com/link2", "text": "链接2"}
-            ]
-        }
+        )

@@ -117,7 +117,8 @@ async def chat(
     # Record assistant response
     conv.add_message("assistant", response_text)
     return ResponseBuilder.success({
-        "response": response_text
+        "response": response_text,
+        "reply": response_text,
     })
 
 
@@ -151,6 +152,39 @@ async def generate_prd(
         context=data.context
     )
     return ResponseBuilder.success(result)
+
+
+@router.post("/generate-prd-stream")
+async def generate_prd_stream(
+    data: GeneratePRDRequest,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db)
+):
+    """Stream PRD generation using SSE"""
+    async def event_generator():
+        full_markdown = ""
+        try:
+            async for chunk in ai_service.generate_prd_stream(
+                title=data.title,
+                description=data.description,
+                industry=data.industry or "general",
+                context=data.context
+            ):
+                full_markdown += chunk
+                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk}, ensure_ascii=True)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'markdown': full_markdown}, ensure_ascii=True)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=True)}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/review-materials", response_model=dict)

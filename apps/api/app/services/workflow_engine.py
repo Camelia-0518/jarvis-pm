@@ -188,7 +188,109 @@ STANDARD_WORKFLOWS = {
                 }
             )
         ]
-    )
+    ),
+    # ========== 技能链工作流（与前端 SKILL_CHAINS 对应）==========
+    "from-scratch": WorkflowDefinition(
+        name="from-scratch",
+        description="从 0 开发新功能：头脑风暴 → PRD → 评审准备",
+        steps=[
+            WorkflowStep(
+                skill_id="requirement-analysis",
+                step_name="头脑风暴",
+                inputs_mapping={
+                    "idea": "$.initial.idea",
+                    "targetUsers": "$.initial.targetUsers",
+                    "industry": "$.initial.industry",
+                    "constraints": "$.initial.constraints"
+                }
+            ),
+            WorkflowStep(
+                skill_id="write-prd",
+                step_name="PRD撰写",
+                inputs_mapping={
+                    "requirementAnalysis": "$.steps.头脑风暴.output.requirementDoc",
+                    "template": "$.initial.industry",
+                    "detailLevel": "standard"
+                },
+                timeout=360
+            ),
+            WorkflowStep(
+                skill_id="medical-review",
+                step_name="评审准备",
+                inputs_mapping={
+                    "requirement": "$.steps.PRD撰写.output.markdown",
+                    "featureType": "$.initial.featureType",
+                    "patientData": "$.initial.patientData"
+                }
+            )
+        ]
+    ),
+    "security-review": WorkflowDefinition(
+        name="security-review",
+        description="安全审查流程：风险识别 → 合规检查 → 报告生成",
+        steps=[
+            WorkflowStep(
+                skill_id="requirement-analysis",
+                step_name="风险识别",
+                inputs_mapping={
+                    "idea": "$.initial.idea",
+                    "targetUsers": "$.initial.targetUsers",
+                    "industry": "$.initial.industry",
+                    "constraints": "$.initial.constraints"
+                }
+            ),
+            WorkflowStep(
+                skill_id="compliance-check",
+                step_name="合规检查",
+                inputs_mapping={
+                    "prd": "$.steps.风险识别.output.requirementDoc",
+                    "complianceLevel": "$.initial.complianceLevel"
+                }
+            ),
+            WorkflowStep(
+                skill_id="medical-review",
+                step_name="报告生成",
+                inputs_mapping={
+                    "requirement": "$.steps.合规检查.output.summary",
+                    "featureType": "$.initial.featureType",
+                    "patientData": "$.initial.patientData"
+                }
+            )
+        ]
+    ),
+    "prd-package": WorkflowDefinition(
+        name="prd-package",
+        description="PRD 完整输出包：PRD + 评审材料 + 站会模板",
+        steps=[
+            WorkflowStep(
+                skill_id="write-prd",
+                step_name="PRD撰写",
+                inputs_mapping={
+                    "requirementAnalysis": "$.initial.requirementAnalysis",
+                    "template": "$.initial.industry",
+                    "detailLevel": "standard"
+                },
+                timeout=360
+            ),
+            WorkflowStep(
+                skill_id="medical-review",
+                step_name="评审材料",
+                inputs_mapping={
+                    "requirement": "$.steps.PRD撰写.output.markdown",
+                    "featureType": "$.initial.featureType",
+                    "patientData": "$.initial.patientData"
+                }
+            ),
+            WorkflowStep(
+                skill_id="milestone-plan",
+                step_name="站会模板",
+                inputs_mapping={
+                    "prd": "$.steps.PRD撰写.output.markdown",
+                    "teamSize": "$.initial.teamSize"
+                }
+            )
+        ]
+    ),
 }
 
 

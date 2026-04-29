@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from app.api.v1.endpoints import auth, projects, prds, agents, ai, tools, skills, code, evaluation, rag, prd_generator, workflows, battles, websocket
+from app.api.v1.endpoints import auth, projects, prds, agents, ai, tools, skills, code, evaluation, rag, prd_generator, workflows, battles, websocket, feedback, annotations, personas, competitors, reviews, requirements, templates, prompts
 
 api_router = APIRouter()
 
@@ -21,3 +21,11 @@ api_router.include_router(prd_generator.router, prefix="/prd-generator", tags=["
 api_router.include_router(workflows.router, prefix="/workflows", tags=["Workflows"])
 api_router.include_router(battles.router, prefix="/battles", tags=["Battles"])
 api_router.include_router(websocket.router, tags=["WebSocket"])
+api_router.include_router(feedback.router, prefix="/feedback", tags=["Feedback"])
+api_router.include_router(annotations.router, prefix="/prds/{prd_id}/annotations", tags=["Annotations"])
+api_router.include_router(personas.router, tags=["Personas"])
+api_router.include_router(competitors.router, tags=["Competitors"])
+api_router.include_router(reviews.router, tags=["Reviews"])
+api_router.include_router(requirements.router, tags=["Requirements"])
+api_router.include_router(templates.router, prefix="/templates", tags=["Templates"])
+api_router.include_router(prompts.router, prefix="/prompts", tags=["Prompts"])

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 from app.core.cache import cache_manager
-from app.services.llm_provider import LLMProviderFactory, LLMProvider
+from app.agents.llm_client import LLMClient, LLMClientFactory, create_default_client
 from app.services.medical_terminology import (
     detect_medical_terms,
     enrich_prompt_with_terminology,
@@ -46,7 +46,11 @@ class SkillProcessorEnhanced:
 
     def __init__(self, llm_provider: str = None, enable_cache: bool = True):
         self._skills: Dict[str, Dict[str, Any]] = {}
-        self._llm: LLMProvider = LLMProviderFactory.create(llm_provider)
+        # 统一使用 llm_client 体系的 FallbackLLMClient（支持真实 AI 自动降级）
+        if llm_provider and llm_provider != "fallback":
+            self._llm: LLMClient = LLMClientFactory.create(llm_provider)
+        else:
+            self._llm: LLMClient = create_default_client()
         self._enable_cache = enable_cache
         self._init_skills()
 
@@ -193,25 +197,29 @@ class SkillProcessorEnhanced:
 **模板类型**：{template}
 **详细程度**：{detailLevel}
 
-请按以下 JSON 格式输出：
+请根据需求分析结果撰写PRD，按以下 JSON 格式返回：
 {{
-  "title": "文档标题",
-  "version": "版本号",
+  "title": "文档标题（简洁）",
+  "version": "1.0",
   "sections": [
-    {{"title": "章节标题", "content": "章节内容", "priority": "high"}}
+    {{"title": "1. 文档信息", "content": "版本历史、作者...", "priority": "high"}},
+    {{"title": "2. 项目背景与目标", "content": "...", "priority": "high"}},
+    {{"title": "3. 用户画像", "content": "...", "priority": "high"}},
+    {{"title": "4. 功能需求", "content": "...", "priority": "high"}},
+    {{"title": "5. 非功能需求", "content": "...", "priority": "normal"}},
+    {{"title": "6. 数据埋点", "content": "...", "priority": "normal"}},
+    {{"title": "7. 里程碑", "content": "...", "priority": "normal"}},
+    {{"title": "8. 附录", "content": "...", "priority": "low"}}
   ],
-  "markdown": "完整的Markdown格式PRD文档"
+  "markdown": "# 文档标题\n\n> 版本: 1.0\n\n## 1. 文档信息\n...\n\n## 2. 项目背景与目标\n...\n\n（每个章节写2-3段详细内容，总字数不少于500字）"
 }}
 
-PRD应该包含：
-1. 文档信息（版本、日期、作者）
-2. 项目背景与目标
-3. 用户画像
-4. 功能需求（详细描述每个功能）
-5. 非功能需求
-6. 数据埋点
-7. 里程碑
-8. 附录""",
+重要要求：
+1. 必须返回合法 JSON
+2. title 必须是完整的字符串，不要截断
+3. markdown 字段放完整的 PRD 正文（用 \n 换行）
+4. sections 的 content 也要充实详细，不要只写一句话
+5. 使用中文撰写""",
             },
 
             "tech-architecture": {
@@ -518,6 +526,100 @@ PRD应该包含：
 - fail: 不合规""",
             },
 
+            "ux-design": {
+                "id": "ux-design",
+                "name": "UX 设计",
+                "description": "生成完整的UX设计方案，包括用户流程、线框图、交互设计和设计系统",
+                "agentRole": "designer",
+                "category": "design",
+                "icon": "🎨",
+                "tags": ["UX", "设计", "用户体验"],
+                "parameters": [
+                    {
+                        "name": "prd",
+                        "label": "PRD 文档",
+                        "type": "textarea",
+                        "description": "产品需求文档内容",
+                        "required": True,
+                    },
+                    {
+                        "name": "platform",
+                        "label": "目标平台",
+                        "type": "select",
+                        "description": "设计的目标平台",
+                        "required": True,
+                        "options": [
+                            {"label": "Web 应用", "value": "web"},
+                            {"label": "移动端 App", "value": "mobile-app"},
+                            {"label": "响应式 Web", "value": "responsive"},
+                            {"label": "小程序", "value": "miniprogram"},
+                        ],
+                        "defaultValue": "web",
+                    },
+                    {
+                        "name": "designStyle",
+                        "label": "设计风格",
+                        "type": "select",
+                        "description": "UI设计风格偏好",
+                        "required": False,
+                        "options": [
+                            {"label": "简洁现代", "value": "modern"},
+                            {"label": "专业商务", "value": "professional"},
+                            {"label": "活泼友好", "value": "friendly"},
+                            {"label": "医疗专业", "value": "medical"},
+                        ],
+                        "defaultValue": "modern",
+                    },
+                ],
+                "prompt_template": """你是资深UX设计师，擅长用户流程设计和交互设计。
+
+请根据以下 PRD 生成完整的 UX 设计方案：
+
+**PRD 文档**：
+{prd}
+
+**目标平台**：{platform}
+**设计风格**：{designStyle}
+
+请按以下 JSON 格式输出设计结果：
+{{
+  "userFlows": [
+    {{
+      "name": "用户流程名称",
+      "steps": ["步骤1", "步骤2", "步骤3"],
+      "participants": ["参与者1", "参与者2"]
+    }}
+  ],
+  "wireframes": [
+    {{
+      "screen": "页面名称",
+      "description": "页面描述",
+      "elements": ["元素1", "元素2"],
+      "layout": "布局描述"
+    }}
+  ],
+  "interactions": [
+    {{
+      "action": "用户操作",
+      "trigger": "触发条件",
+      "feedback": "系统反馈",
+      "nextState": "下一状态"
+    }}
+  ],
+  "designTokens": {{
+    "colors": {{"primary": "#xxx", "secondary": "#xxx"}},
+    "typography": {{"heading": "字体", "body": "字体"}},
+    "spacing": {{"unit": "8px"}}
+  }}
+}}
+
+要求：
+1. 用户流程要覆盖核心使用场景
+2. 线框图描述要具体到每个元素的布局
+3. 交互设计要说明状态变化和反馈
+4. 设计系统要包含颜色、字体、间距规范""",
+            },
+
             "multi-branch-analysis": {
                 "id": "multi-branch-analysis",
                 "name": "多院区需求分析",
@@ -627,11 +729,41 @@ PRD应该包含：
                 prompt = enrich_prompt_with_terminology(prompt, detected_terms)
 
         # RAG 检索增强：将相关 Obsidian 知识库内容注入 prompt
+        # 按行业过滤检索结果，避免非医疗请求被医疗知识库污染
         try:
             engine = _get_retrieval_engine()
             if engine and engine.documents:
-                query = " ".join(str(v) for v in inputs.values() if isinstance(v, (str, int, float)))[:200]
-                rag_results = engine.search(query, top_k=3)
+                all_text = " ".join(str(v) for v in inputs.values() if isinstance(v, (str, int, float)))
+                query = all_text[:200]
+
+                # 推断请求的行业：先查 inputs 中的 industry/template，再关键词检测
+                industry_filter = None
+                if inputs.get("industry") and inputs["industry"] != "other":
+                    industry_filter = inputs["industry"]
+                elif inputs.get("template") and inputs["template"] != "default":
+                    industry_map = {
+                        "medical": "medical",
+                        "saas": "saas",
+                        "ecommerce": "ecommerce",
+                        "agile": None,
+                        "standard": None,
+                        "minimal": None,
+                    }
+                    industry_filter = industry_map.get(inputs["template"])
+                # 如果仍无法确定，通过关键词检测 fallback
+                if not industry_filter:
+                    medical_keywords = [
+                        "医疗", "医院", "病理", "切片", "患者", "医生", "护士", "医护",
+                        "挂号", "就诊", "病历", "病案", "HIS", "医保", "药品",
+                        "检验", "检查", "处方", "住院", "门诊", "科室", "急诊",
+                        "medical", "hospital", "pathology", "patient", "doctor", "nurse",
+                        "healthcare", "clinical", "diagnosis", "prescription", "emr", "lis"
+                    ]
+                    if any(kw in all_text.lower() for kw in medical_keywords):
+                        industry_filter = "medical"
+
+                # 只有确定行业时才进行过滤检索；general/unknown 不过滤，让检索自然排序
+                rag_results = engine.search(query, top_k=3, industry_filter=industry_filter)
                 if rag_results:
                     rag_context = "\n\n【相关知识库参考】\n"
                     for i, res in enumerate(rag_results, 1):
@@ -643,8 +775,8 @@ PRD应该包含：
 
         return prompt
 
-    def _parse_json_output(self, text: str) -> Dict[str, Any]:
-        """从LLM响应中提取JSON"""
+    def _parse_json_output(self, text: str, skill_id: str = None) -> Dict[str, Any]:
+        """从LLM响应中提取JSON，支持截断修复"""
         # 尝试提取代码块中的JSON
         json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
         if json_match:
@@ -654,10 +786,90 @@ PRD应该包含：
             json_str = text.strip()
 
         try:
-            return json.loads(json_str)
+            parsed = json.loads(json_str)
+            # 对 write-prd，验证解析结果是否合理
+            if skill_id == "write-prd":
+                title = parsed.get("title", "")
+                if not title or len(title) < 3 or title in ("{", "[", ""):
+                    return {"raw_response": text}
+            return parsed
         except json.JSONDecodeError:
-            # 如果解析失败，返回文本内容
-            return {"raw_response": text}
+            # 尝试修复被截断的JSON
+            try:
+                fixed = self._repair_truncated_json(json_str)
+                parsed = json.loads(fixed)
+                # 修复后也要验证 write-prd 的 title
+                if skill_id == "write-prd":
+                    title = parsed.get("title", "")
+                    if not title or len(title) < 3 or title in ("{", "[", ""):
+                        return {"raw_response": text}
+                return parsed
+            except json.JSONDecodeError:
+                # 如果解析失败，返回文本内容
+                return {"raw_response": text}
+
+    def _repair_truncated_json(self, raw: str) -> str:
+        """尝试修复被截断的JSON字符串"""
+        cleaned = raw.rstrip()
+
+        # 如果还在字符串中，找到最后一个完整的字符串闭合
+        last_safe_pos = -1
+        i = 0
+        in_string = False
+        escape_next = False
+        while i < len(cleaned):
+            ch = cleaned[i]
+            if escape_next:
+                escape_next = False
+                i += 1
+                continue
+            if ch == '\\':
+                escape_next = True
+                i += 1
+                continue
+            if ch == '"':
+                in_string = not in_string
+                if not in_string:
+                    last_safe_pos = i
+                i += 1
+                continue
+            i += 1
+
+        if in_string and last_safe_pos >= 0:
+            cleaned = cleaned[:last_safe_pos + 1]
+
+        # 去掉末尾的逗号
+        cleaned = cleaned.rstrip().rstrip(',')
+
+        # 补齐缺失的闭合括号/花括号（忽略字符串内部）
+        brace_depth = 0
+        bracket_depth = 0
+        in_str = False
+        escape = False
+        for ch in cleaned:
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                continue
+            if ch == '"':
+                in_str = not in_str
+                continue
+            if not in_str:
+                if ch == '{':
+                    brace_depth += 1
+                elif ch == '}':
+                    brace_depth -= 1
+                elif ch == '[':
+                    bracket_depth += 1
+                elif ch == ']':
+                    bracket_depth -= 1
+
+        cleaned += ']' * max(0, bracket_depth)
+        cleaned += '}' * max(0, brace_depth)
+
+        return cleaned
 
     def _format_output(self, skill: Dict[str, Any], output: Dict[str, Any]) -> str:
         """生成格式化的markdown输出"""
@@ -684,7 +896,7 @@ PRD应该包含：
                     lines.append("")
 
         elif skill['id'] == 'write-prd':
-            # PRD技能直接返回markdown内容
+            # LLM 直接返回 markdown，直接使用
             return output.get('markdown', output.get('raw_response', 'N/A'))
 
         elif skill['id'] == 'tech-architecture':
@@ -692,6 +904,32 @@ PRD应该包含：
             lines.append(f"### 系统组件\n")
             for component in output.get('components', []):
                 lines.append(f"- **{component.get('name')}**: {component.get('description')}")
+
+        elif skill['id'] == 'ux-design':
+            lines.append(f"### 用户流程\n")
+            for flow in output.get('userFlows', []):
+                lines.append(f"**{flow.get('name', '未命名')}**")
+                for step in flow.get('steps', []):
+                    lines.append(f"- {step}")
+                lines.append("")
+            lines.append(f"### 线框图\n")
+            for wf in output.get('wireframes', []):
+                lines.append(f"**{wf.get('screen', '未命名')}**: {wf.get('description', '')}")
+                lines.append(f"- 布局: {wf.get('layout', 'N/A')}")
+                lines.append("")
+            lines.append(f"### 交互设计\n")
+            for inter in output.get('interactions', []):
+                lines.append(f"- **{inter.get('action', '操作')}**: {inter.get('trigger', '')} → {inter.get('feedback', '')}")
+            lines.append("")
+            tokens = output.get('designTokens', {})
+            if tokens:
+                lines.append(f"### 设计系统\n")
+                colors = tokens.get('colors', {})
+                if colors:
+                    lines.append(f"- 主色: {colors.get('primary', 'N/A')}")
+                typography = tokens.get('typography', {})
+                if typography:
+                    lines.append(f"- 字体: {typography.get('heading', 'N/A')}")
 
         else:
             # 默认格式
@@ -752,14 +990,16 @@ PRD应该包含：
         # 调用LLM
         start_time = time.time()
         try:
-            response_text = await self._llm.complete(
-                prompt,
+            # write-prd needs more tokens for full markdown output
+            max_tokens = 8000 if skill_id == "write-prd" else 4000
+            response_text = await self._llm.chat(
+                [{"role": "user", "content": prompt}],
                 temperature=0.7,
-                max_tokens=4000
+                max_tokens=max_tokens
             )
 
             # 解析JSON输出
-            output = self._parse_json_output(response_text)
+            output = self._parse_json_output(response_text, skill_id=skill_id)
 
             # 修复常见问题
             output = OutputValidator.fix_common_issues(skill_id, output)

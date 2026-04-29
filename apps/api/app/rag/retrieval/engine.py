@@ -48,7 +48,7 @@ class RetrievalEngine:
     def __init__(
         self,
         embedding_model: str = "paraphrase-multilingual-MiniLM-L12-v2",
-        enable_embedding: bool = True,
+        enable_embedding: bool = False,
     ):
         self.documents: Dict[str, Dict[str, Any]] = {}
         self.vectorizer: Optional[Any] = None
@@ -96,7 +96,14 @@ class RetrievalEngine:
         self.embeddings = None
         self._dirty = True
 
-    def search(self, query: str, top_k: int = 3) -> List[RetrievalResult]:
+    def _match_industry(self, doc: Dict[str, Any], industry_filter: Optional[str]) -> bool:
+        """Check if a document matches the requested industry filter."""
+        if not industry_filter or industry_filter == "general":
+            return True
+        industries = doc.get("metadata", {}).get("industries", [])
+        return industry_filter in industries
+
+    def search(self, query: str, top_k: int = 3, industry_filter: Optional[str] = None) -> List[RetrievalResult]:
         """
         检索相关文档。
 
@@ -104,6 +111,11 @@ class RetrievalEngine:
         1. 语义向量检索（sentence-transformers，最佳语义匹配）
         2. TF-IDF + cosine similarity（sklearn 可用且文档数 >= 2）
         3. 关键词匹配（Jaccard similarity，fallback）
+
+        Args:
+            query: 查询文本
+            top_k: 返回结果数量
+            industry_filter: 按行业过滤（如 "medical", "ecommerce"），None 或 "general" 表示不过滤
         """
         if not self.documents:
             return []
@@ -115,16 +127,16 @@ class RetrievalEngine:
         # 1. 优先语义检索
         if self._enable_embedding and self._ensure_embedder():
             try:
-                return self._semantic_search(query, top_k)
+                return self._semantic_search(query, top_k, industry_filter)
             except Exception as e:
                 logger.warning("Semantic search failed: %s, falling back", e)
 
         # 2. TF-IDF 向量检索
         if SKLEARN_AVAILABLE and len(self.documents) >= 2:
-            return self._vector_search(query, top_k)
+            return self._vector_search(query, top_k, industry_filter)
 
         # 3. 关键词匹配 fallback
-        return self._keyword_search(query, top_k)
+        return self._keyword_search(query, top_k, industry_filter)
 
     def _ensure_embedder(self) -> bool:
         """延迟初始化 embedder"""
@@ -134,7 +146,7 @@ class RetrievalEngine:
             return False
         try:
             logger.info("Loading embedding model: %s", self._embedding_model_name)
-            self.embedder = SentenceTransformer(self._embedding_model_name)
+            self.embedder = SentenceTransformer(self._embedding_model_name, local_files_only=True)
             logger.info("Embedding model loaded successfully")
             return True
         except Exception as e:
@@ -189,7 +201,7 @@ class RetrievalEngine:
 
         self._dirty = False
 
-    def _semantic_search(self, query: str, top_k: int) -> List[RetrievalResult]:
+    def _semantic_search(self, query: str, top_k: int, industry_filter: Optional[str] = None) -> List[RetrievalResult]:
         """语义向量检索"""
         self._build_index()
         if self.embeddings is None or self.embedder is None:
@@ -214,20 +226,25 @@ class RetrievalEngine:
         scored.sort(key=lambda x: x[1], reverse=True)
 
         results = []
-        for doc_id, score in scored[:top_k]:
-            if score > 0:
-                doc = self.documents[doc_id]
-                results.append(
-                    RetrievalResult(
-                        doc_id=doc_id,
-                        content=doc["content"],
-                        score=round(score, 4),
-                        metadata=doc["metadata"],
-                    )
+        for doc_id, score in scored:
+            if score <= 0:
+                break
+            doc = self.documents[doc_id]
+            if not self._match_industry(doc, industry_filter):
+                continue
+            results.append(
+                RetrievalResult(
+                    doc_id=doc_id,
+                    content=doc["content"],
+                    score=round(score, 4),
+                    metadata=doc["metadata"],
                 )
+            )
+            if len(results) >= top_k:
+                break
         return results
 
-    def _vector_search(self, query: str, top_k: int) -> List[RetrievalResult]:
+    def _vector_search(self, query: str, top_k: int, industry_filter: Optional[str] = None) -> List[RetrievalResult]:
         """TF-IDF 向量检索"""
         self._build_index()
 
@@ -242,20 +259,25 @@ class RetrievalEngine:
         scored.sort(key=lambda x: x[1], reverse=True)
 
         results = []
-        for doc_id, score in scored[:top_k]:
-            if score > 0:
-                doc = self.documents[doc_id]
-                results.append(
-                    RetrievalResult(
-                        doc_id=doc_id,
-                        content=doc["content"],
-                        score=round(score, 4),
-                        metadata=doc["metadata"],
-                    )
+        for doc_id, score in scored:
+            if score <= 0:
+                break
+            doc = self.documents[doc_id]
+            if not self._match_industry(doc, industry_filter):
+                continue
+            results.append(
+                RetrievalResult(
+                    doc_id=doc_id,
+                    content=doc["content"],
+                    score=round(score, 4),
+                    metadata=doc["metadata"],
                 )
+            )
+            if len(results) >= top_k:
+                break
         return results
 
-    def _keyword_search(self, query: str, top_k: int) -> List[RetrievalResult]:
+    def _keyword_search(self, query: str, top_k: int, industry_filter: Optional[str] = None) -> List[RetrievalResult]:
         """关键词检索（fallback）"""
         query_tokens = set(self._tokenize(query))
         if not query_tokens:
@@ -263,6 +285,8 @@ class RetrievalEngine:
 
         scored = []
         for doc_id, doc in self.documents.items():
+            if not self._match_industry(doc, industry_filter):
+                continue
             doc_tokens = set(self._tokenize(doc["content"]))
             intersection = query_tokens & doc_tokens
             union = query_tokens | doc_tokens

@@ -127,21 +127,25 @@ async def list_projects(
     result = await db.execute(query)
     projects = result.scalars().all()
 
+    # Get all PRD counts in a single query to avoid N+1
+    project_ids = [p.id for p in projects]
+    prd_counts_result = await db.execute(
+        select(PRD.project_id, func.count(PRD.id))
+        .where(PRD.project_id.in_(project_ids))
+        .group_by(PRD.project_id)
+    )
+    prd_counts = {pid: count for pid, count in prd_counts_result.all()}
+
     # Build response with PRD counts
     project_list = []
     for project in projects:
-        prd_result = await db.execute(
-            select(func.count(PRD.id)).where(PRD.project_id == project.id)
-        )
-        prd_count = prd_result.scalar()
-
         project_list.append({
             "id": project.id,
             "name": project.name,
             "description": project.description,
             "industry": project.industry,
             "status": project.status.value,
-            "prd_count": prd_count,
+            "prd_count": prd_counts.get(project.id, 0),
             "created_at": project.created_at,
             "updated_at": project.updated_at,
         })

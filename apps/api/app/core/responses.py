@@ -122,7 +122,12 @@ class ResponseBuilder:
 
         return {
             "success": True,
-            "data": data,
+            "data": {
+                "items": data,
+                "total": total,
+                "page": page,
+                "limit": limit,
+            },
             "error": None,
             "meta": meta
         }

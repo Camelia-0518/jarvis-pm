@@ -38,7 +38,7 @@ Jarvis PM 是一个专为产品经理打造的 AI 原生工作平台，通过深
 
 ### 技术栈
 
-- **前端**: Next.js 15 + React 19 + TypeScript + Tailwind CSS
+- **前端**: Next.js 14 + React 18 + TypeScript + Tailwind CSS
 - **后端**: FastAPI + Python 3.11
 - **数据库**: PostgreSQL + Redis
 - **AI**: Claude API / Kimi API

@@ -18,6 +18,51 @@ DEFAULT_VAULT_PATH = r"C:\Users\13400\Documents\Obsidian\MyVault"
 DEFAULT_INCLUDE_DIRS = ["04-项目层", "05-知识层", "06-经验层"]
 
 
+# Industry keyword mapping for automatic document tagging
+_INDUSTRY_KEYWORDS = {
+    "medical": [
+        "医疗", "医院", "病理", "切片", "患者", "医生", "护士", "医护",
+        "挂号", "就诊", "病历", "病案", "HIS", "医保", "药品",
+        "检验", "检查", "处方", "住院", "门诊", "科室", "急诊",
+        "medical", "hospital", "pathology", "patient", "doctor", "nurse",
+        "healthcare", "clinical", "diagnosis", "prescription", "emr", "lis"
+    ],
+    "ecommerce": [
+        "电商", "商品", "订单", "购物车", "支付", "物流", "库存",
+        "促销", "优惠券", "会员", "商家", "平台", "SKU", "GMV",
+        "ecommerce", "shop", "product", "order", "cart",
+        "payment", "shipping", "inventory", "merchant"
+    ],
+    "saas": [
+        "SaaS", "租户", "订阅", "MRR", "ARR", "NPS", "CAC",
+        "onboarding", "activation", "retention", "churn",
+        "多租户", "付费转化", "续费", "SLA", "API平台"
+    ],
+    "education": [
+        "教育", "学校", "学生", "教师", "课程", "考试", "学习",
+        "培训", "在线", "课堂", "作业", "成绩", "校园",
+        "education", "school", "student", "teacher", "course",
+        "learning", "training", "classroom", "academic"
+    ],
+    "finance": [
+        "金融", "银行", "支付", "理财", "保险", "证券", "投资",
+        "贷款", "信用卡", "转账", "风控", "合规", "反洗钱",
+        "finance", "bank", "payment", "insurance", "investment",
+        "trading", "risk", "compliance", "aml"
+    ],
+}
+
+
+def _detect_industry(text: str) -> list[str]:
+    """Detect industries mentioned in text based on keyword matching."""
+    text_lower = text.lower()
+    matched = []
+    for industry, keywords in _INDUSTRY_KEYWORDS.items():
+        if any(kw in text_lower for kw in keywords):
+            matched.append(industry)
+    return matched
+
+
 def load_obsidian_documents(
     engine: RetrievalEngine,
     vault_path: Optional[str] = None,
@@ -57,6 +102,11 @@ def load_obsidian_documents(
 
                 rel_path = md_file.relative_to(vault).as_posix()
                 doc_id = f"obsidian::{rel_path}"
+
+                # Auto-detect industry tags from path + filename + first 500 chars of content
+                detect_text = f"{rel_path} {md_file.name} {content[:500]}"
+                industries = _detect_industry(detect_text)
+
                 engine.add_document(
                     doc_id=doc_id,
                     content=content,
@@ -64,6 +114,7 @@ def load_obsidian_documents(
                         "source": "obsidian",
                         "path": rel_path,
                         "filename": md_file.name,
+                        "industries": industries,
                     },
                 )
                 loaded += 1
@@ -160,6 +211,11 @@ class _VaultEventHandler(FileSystemEventHandler):  # type: ignore[misc]
 
             rel = path.relative_to(self.vault).as_posix()
             doc_id = f"obsidian::{rel}"
+
+            # Auto-detect industry tags from path + filename + first 500 chars
+            detect_text = f"{rel} {path.name} {content[:500]}"
+            industries = _detect_industry(detect_text)
+
             self.engine.add_document(
                 doc_id=doc_id,
                 content=content,
@@ -167,6 +223,7 @@ class _VaultEventHandler(FileSystemEventHandler):  # type: ignore[misc]
                     "source": "obsidian",
                     "path": rel,
                     "filename": path.name,
+                    "industries": industries,
                 },
             )
             logger.info("Updated RAG document: %s", doc_id)

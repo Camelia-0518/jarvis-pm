@@ -29,7 +29,7 @@ class Variant(BaseModel):
 
     # 变体配置
     prompt_template: Optional[str] = Field(default=None, description="Prompt模板")
-    model_params: Dict[str, Any] = Field(default_factory=dict, description="模型参数")
+    llm_params: Dict[str, Any] = Field(default_factory=dict, description="模型参数")
     feature_flags: Dict[str, bool] = Field(default_factory=dict, description="功能开关")
 
     # 统计数据

@@ -12,9 +12,9 @@ def setup_logging():
     )
 
 
-# Audit logger stub
+# Audit logger
 class AuditLogger:
-    """Audit logger stub"""
+    """Audit logger for security and access events"""
     def log_security(self, event: str, severity: str = "info", details: Any = None):
         """Log security event"""
         logging.info(f"Audit [{severity}]: {event} - {details}")

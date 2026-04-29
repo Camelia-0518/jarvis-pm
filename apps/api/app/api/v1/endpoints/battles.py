@@ -308,22 +308,25 @@ async def _execute_day_tool(
         if existing_prd:
             notes = f"已存在 PRD：{existing_prd.title}。系统自动补充了背景与目标章节内容。"
             # Generate chapter 1 and append
-            ai_result = await ai_service.generate_prd_chapter(
-                chapter="1",
-                prompt=f"项目：{project_name}，描述：{project_desc}",
-                context=existing_prd.ai_generated if existing_prd.ai_generated else {},
-                industry=industry,
-            )
-            new_md = ai_result.get("markdown", "")
-            existing_prd.markdown = (existing_prd.markdown or "") + "\n\n" + new_md
-            content_struct = existing_prd.content or {"chapters": {}, "template": template, "industry": industry}
-            content_struct["chapters"] = content_struct.get("chapters", {})
-            content_struct["chapters"]["1"] = {
-                "title": ai_result.get("content", {}).get("sections", [{}])[0].get("title", "背景与目标"),
-                "content": new_md,
-                "status": "generated"
-            }
-            existing_prd.content = content_struct
+            try:
+                ai_result = await ai_service.generate_prd_chapter(
+                    chapter="1",
+                    prompt=f"项目：{project_name}，描述：{project_desc}",
+                    context=existing_prd.ai_generated if existing_prd.ai_generated else {},
+                    industry=industry,
+                )
+                new_md = ai_result.get("markdown", "")
+                existing_prd.markdown = (existing_prd.markdown or "") + "\n\n" + new_md
+                content_struct = existing_prd.content or {"chapters": {}, "template": template, "industry": industry}
+                content_struct["chapters"] = content_struct.get("chapters", {})
+                content_struct["chapters"]["1"] = {
+                    "title": ai_result.get("content", {}).get("sections", [{}])[0].get("title", "背景与目标"),
+                    "content": new_md,
+                    "status": "generated"
+                }
+                existing_prd.content = content_struct
+            except Exception as e:
+                notes = f"AI生成失败：{str(e)}。请检查API配置。"
         else:
             ai_result = await ai_service.generate_prd(
                 title=project_name,
@@ -363,23 +366,26 @@ async def _execute_day_tool(
         )
         prd = result.scalars().first()
         if prd:
-            ai_result = await ai_service.generate_prd_chapter(
-                chapter="4",
-                prompt=f"项目：{project_name}，描述：{project_desc}",
-                context=prd.ai_generated if prd.ai_generated else {},
-                industry=industry,
-            )
-            new_md = ai_result.get("markdown", "")
-            prd.markdown = (prd.markdown or "") + "\n\n" + new_md
-            content_struct = prd.content or {"chapters": {}, "template": "standard", "industry": industry}
-            content_struct["chapters"] = content_struct.get("chapters", {})
-            content_struct["chapters"]["4"] = {
-                "title": ai_result.get("content", {}).get("sections", [{}])[0].get("title", "功能规格"),
-                "content": new_md,
-                "status": "generated"
-            }
-            prd.content = content_struct
-            notes = f"已为 PRD「{prd.title}」生成功能规格章节。"
+            try:
+                ai_result = await ai_service.generate_prd_chapter(
+                    chapter="4",
+                    prompt=f"项目：{project_name}，描述：{project_desc}",
+                    context=prd.ai_generated if prd.ai_generated else {},
+                    industry=industry,
+                )
+                new_md = ai_result.get("markdown", "")
+                prd.markdown = (prd.markdown or "") + "\n\n" + new_md
+                content_struct = prd.content or {"chapters": {}, "template": "standard", "industry": industry}
+                content_struct["chapters"] = content_struct.get("chapters", {})
+                content_struct["chapters"]["4"] = {
+                    "title": ai_result.get("content", {}).get("sections", [{}])[0].get("title", "功能规格"),
+                    "content": new_md,
+                    "status": "generated"
+                }
+                prd.content = content_struct
+                notes = f"已为 PRD「{prd.title}」生成功能规格章节。"
+            except Exception as e:
+                notes = f"AI生成失败：{str(e)}。请检查API配置。"
         else:
             notes = "未找到 PRD，请先完成 Day 3。"
 

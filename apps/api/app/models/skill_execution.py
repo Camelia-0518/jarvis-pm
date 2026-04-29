@@ -56,17 +56,31 @@ class SkillExecution(Base):
         return f"<SkillExecution(id={self.id}, skill_id={self.skill_id}, success={self.success})>"
 
     def to_dict(self):
-        """Convert to dictionary representation"""
+        """Convert to dictionary representation with JSON-safe values"""
+
+        def _sanitize(value):
+            """Recursively sanitize values for JSON serialization"""
+            if value is None:
+                return None
+            if isinstance(value, (str, int, float, bool)):
+                return value
+            if isinstance(value, dict):
+                return {k: _sanitize(v) for k, v in value.items()}
+            if isinstance(value, list):
+                return [_sanitize(v) for v in value]
+            # Fallback: convert to string
+            return str(value)
+
         return {
             "id": self.id,
             "skill_id": self.skill_id,
             "workflow_id": self.workflow_id,
             "project_id": self.project_id,
-            "inputs": self.inputs,
-            "output": self.output,
-            "success": self.success,
-            "execution_time_ms": self.execution_time_ms,
-            "token_usage": self.token_usage,
+            "inputs": _sanitize(self.inputs),
+            "output": _sanitize(self.output),
+            "success": bool(self.success),
+            "execution_time_ms": int(self.execution_time_ms) if self.execution_time_ms else 0,
+            "token_usage": _sanitize(self.token_usage),
             "error_message": self.error_message,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,

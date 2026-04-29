@@ -41,3 +41,11 @@ jarvis_pm_demo_screenshots/
 
 # Session memory (local only)
 SESSION_MEMORY.md
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# All env files
+.env.*

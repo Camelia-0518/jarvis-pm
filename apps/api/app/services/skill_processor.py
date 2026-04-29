@@ -930,11 +930,15 @@ class SkillProcessor:
         try:
             # 优先委托给增强版处理器（支持真实 LLM、缓存、Schema 验证、医疗术语增强）
             if skill_id in self._enhanced._skills:
-                enhanced_result = await self._enhanced.execute_skill(
+                # 使用新的 provider 重新创建 enhanced 实例，避免缓存旧的 mock provider
+                from app.core.config import settings
+                provider = settings.DEFAULT_AI_PROVIDER
+                enhanced = SkillProcessorEnhanced(llm_provider=provider, enable_cache=True)
+                enhanced_result = await enhanced.execute_skill(
                     skill_id=skill_id,
                     inputs=inputs,
                     context=context or {},
-                    skip_cache=False
+                    skip_cache=True
                 )
                 # 保持与旧接口兼容的字段映射
                 return {

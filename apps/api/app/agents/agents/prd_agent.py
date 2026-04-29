@@ -13,13 +13,34 @@ import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import json
+import logging
 import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
+from pydantic import BaseModel, Field, ValidationError
+
 from ..base import BaseAgent, AgentResult, AgentState
 from ..llm_client import create_default_client
 from ..templates import get_template_system, IndustryType
+from ..evaluator import LLMJudge
+
+logger = logging.getLogger(__name__)
+
+
+class PRDSection(BaseModel):
+    """PRD 章节结构"""
+    title: str = Field(default="", description="章节标题")
+    content: str = Field(default="", description="章节内容")
+    subsections: List[Dict[str, str]] = Field(default_factory=list, description="子章节")
+
+
+class PRDStructuredOutput(BaseModel):
+    """PRD 结构化输出模型"""
+    title: str = Field(default="", description="PRD 标题")
+    sections: List[PRDSection] = Field(default_factory=list, description="章节列表")
+    summary: str = Field(default="", description="摘要")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="元数据")
 
 
 class PRDAgent(BaseAgent):
@@ -64,9 +85,9 @@ class PRDAgent(BaseAgent):
 5. 医疗/金融等行业必须包含专门的合规与数据安全章节
 
 输出要求：
-- 必须同时返回 **结构化 JSON** 和 **Markdown 文档**
-- JSON 用于系统存储和前端渲染
-- Markdown 用于人工阅读和导出
+- 仅返回 Markdown 格式的 PRD 文档
+- 不要返回 JSON
+- 使用标准 Markdown 语法（# ## ### 等标题）
 """
 
     def __init__(self, llm_client=None, **kwargs):
@@ -77,6 +98,7 @@ class PRDAgent(BaseAgent):
         )
         self.template_system = get_template_system()
         self._section_cache: Dict[str, str] = {}
+        self._evaluator = LLMJudge(llm_client=self.llm_client)
 
     async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
         """
@@ -130,6 +152,29 @@ class PRDAgent(BaseAgent):
             structured, markdown = self._parse_output(raw_output, ctx)
             self._complete_step(step5, f"Markdown {len(markdown)} 字符, 提取 {len(structured.get('sections', []))} 个章节")
 
+            # 步骤6: 自动质量评估 (LLM-as-a-Judge)
+            step6 = self._create_step("quality_eval", "AI 质量评估")
+            eval_result = None
+            try:
+                eval_result = await self._evaluator.evaluate(
+                    agent_name=self.name,
+                    task_type="prd",
+                    output=markdown,
+                    context={
+                        "product_name": ctx["product_name"],
+                        "industry": ctx["industry"],
+                        "template_id": template.id if template else None,
+                    },
+                )
+                self._complete_step(
+                    step6,
+                    f"综合评分: {eval_result.total_score}/10, "
+                    f"完整性: {eval_result.scores.get('completeness', 0)}, "
+                    f"清晰度: {eval_result.scores.get('clarity', 0)}"
+                )
+            except Exception as eval_err:
+                self._complete_step(step6, f"评估跳过: {eval_err}")
+
             execution_time = (datetime.now() - start_time).total_seconds()
             self._set_state(AgentState.COMPLETED)
 
@@ -147,6 +192,7 @@ class PRDAgent(BaseAgent):
                     "user_stories": structured.get("user_stories", []),
                     "requirements": structured.get("requirements", []),
                     "compliance_items": structured.get("compliance_items", []),
+                    "evaluation": eval_result.to_dict() if eval_result else None,
                 },
                 execution_time=execution_time,
                 metadata={
@@ -154,6 +200,7 @@ class PRDAgent(BaseAgent):
                     "version": self.version,
                     "steps_completed": len(self.steps),
                     "template_used": template.id if template else None,
+                    "evaluated": eval_result is not None,
                 }
             )
 
@@ -319,41 +366,54 @@ class PRDAgent(BaseAgent):
             for c in ctx["constraints"]:
                 prompt += f"- {c}\n"
 
+        # 合规章节与功能需求融合提示
+        compliance_fusion = ""
+        template = ctx.get("template")
+        if template and template.compliance_requirements:
+            compliance_fusion = "\n## 合规与功能融合要求\n"
+            compliance_fusion += "在「功能规格」章节中，每个功能模块必须标注其关联的合规要求。\n"
+            compliance_fusion += "格式示例：\n"
+            compliance_fusion += "- 功能A：患者在线申请切片借阅 → 关联合规：患者身份核验（等保三级-身份鉴别）、授权书电子签章（患者隐私保护-授权机制）\n"
+            compliance_fusion += "- 功能B：医生查看检验报告 → 关联合规：RBAC权限控制（等保三级-访问控制）、操作审计（审计追踪-全程记录）\n"
+            compliance_fusion += "\n必须关联的合规维度：\n"
+            for req in template.compliance_requirements[:4]:  # 取前4个关键合规项
+                compliance_fusion += f"- {req.name}：{req.description}\n"
+
         prompt += f"""
 ## 需要生成的章节
 {chr(10).join(section_names)}
+{compliance_fusion}
 
-## 输出格式（非常重要）
-请严格按以下格式返回：
-
-```json
-{{
-    "title": "{ctx['product_name']}",
-    "industry": "{ctx['industry']}",
-    "sections": [
-        {{"id": "background", "name": "背景与目标", "key_points": ["要点1", "要点2"]}},
-        {{"id": "user_stories", "name": "用户故事", "key_points": []}}
-    ],
-    "user_stories": [
-        {{"id": "US-001", "role": "作为患者", "story": "我想要在线申请切片借阅", "acceptance_criteria": ["条件1"], "priority": "P0"}}
-    ],
-    "requirements": [
-        {{"id": "FR-001", "title": "在线申请", "description": "...", "priority": "P0", "type": "functional"}}
-    ],
-    "compliance_items": [
-        {{"name": "等保三级", "category": "security", "checklist": ["..."]}}
-    ],
-    "milestones": [
-        {{"phase": "第一阶段", "deliverables": ["..."], "duration": "2周"}}
-    ]
-}}
-```
-
----
+## 输出格式
+请直接输出 Markdown 格式的 PRD 文档，使用以下结构：
 
 # {ctx['product_name']} 产品需求文档
 
-[此处开始为完整的 Markdown PRD 正文]
+## 1. 背景与目标
+- 要点...
+
+## 2. 用户故事
+- US-001: 作为[角色]，我想要[需求]，以便[价值]
+  - 验收标准: ...
+
+## 3. 业务流程
+- 主流程: ...
+- 异常流程: ...
+
+## 4. 功能规格
+- FR-001: ...
+
+## 5. 数据需求
+- ...
+
+## 6. 合规要求（如适用）
+- ...
+
+## 7. 数据埋点
+- ...
+
+## 8. 里程碑
+- 第一阶段: ...
 """
         return prompt
 
@@ -376,30 +436,55 @@ class PRDAgent(BaseAgent):
 
         return structured, markdown
 
+    def _repair_json(self, raw: str) -> str:
+        """修复常见的 JSON 格式错误"""
+        # 去除首尾空白
+        cleaned = raw.strip()
+        # 去除可能的 markdown 标记
+        cleaned = re.sub(r"^```json\s*|\s*```$", "", cleaned, flags=re.DOTALL)
+        # 去除尾部逗号（对象/数组最后一个元素后的逗号）
+        cleaned = re.sub(r",(\s*[}\]])", r"\1", cleaned)
+        # 将单引号键值对转换为双引号（简单替换）
+        cleaned = re.sub(r"'([^']+)'\s*:", r'"\1":', cleaned)
+        # 修复缺失的右花括号（简单补全）
+        open_count = cleaned.count('{')
+        close_count = cleaned.count('}')
+        if open_count > close_count:
+            cleaned += '}' * (open_count - close_count)
+        return cleaned
+
     def _extract_json(self, content: str) -> Dict[str, Any]:
-        """从输出中提取 JSON 块"""
-        # 尝试匹配 ```json ... ```
-        match = re.search(r"```json\s*(\{.*?\})\s*```", content, re.DOTALL)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
+        """从输出中提取 JSON 块，使用 Pydantic 结构化解析 + 容错修复"""
+        candidates = []
 
-        # 尝试直接找第一个大括号包裹的 JSON
-        match = re.search(r"(\{.*\})", content, re.DOTALL)
+        # 候选1: ```json ... ``` — 贪婪匹配到闭合的 ```
+        match = re.search(r"```json\s*([\s\S]*?)\s*```", content, re.DOTALL)
         if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                pass
+            candidates.append(match.group(1).strip())
 
+        # 候选2: 直接找第一个大括号包裹的内容（贪婪匹配到最后的 }）
+        match = re.search(r"(\{[\s\S]*\})", content)
+        if match:
+            candidates.append(match.group(1).strip())
+
+        for raw in candidates:
+            try:
+                repaired = self._repair_json(raw)
+                data = json.loads(repaired)
+                # 使用 Pydantic 验证结构
+                validated = PRDStructuredOutput.model_validate(data)
+                return validated.model_dump()
+            except (json.JSONDecodeError, ValidationError) as e:
+                logger.warning(f"JSON parse attempt failed: {e}")
+                continue
+
+        logger.error("All JSON parse attempts failed, returning empty dict")
         return {}
 
     def _extract_markdown(self, content: str, fallback_section_id: Optional[str] = None) -> str:
         """提取 Markdown 部分（JSON 之后的内容）"""
-        # 去掉 JSON 块
-        cleaned = re.sub(r"```json\s*\{.*?\}\s*```", "", content, flags=re.DOTALL)
+        # 去掉 JSON 块（贪婪匹配到闭合的 ```）
+        cleaned = re.sub(r"```json\s*[\s\S]*?\s*```", "", content, flags=re.DOTALL)
         cleaned = cleaned.strip()
 
         # 去掉 "---" 分隔线之前的 JSON 残留

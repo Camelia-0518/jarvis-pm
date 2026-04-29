@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 import uuid
 import json
+import time
+from cachetools import TTLCache
 
 from app.services.workflow_engine import WorkflowEngine, STANDARD_WORKFLOWS
 from app.services.skill_processor import skill_processor
@@ -16,8 +18,9 @@ from app.core.responses import ResponseBuilder
 
 router = APIRouter()
 
-# In-memory execution storage (mirrors skills.py pattern)
-execution_records: Dict[str, dict] = {}
+# In-memory execution storage with TTL to prevent memory leaks
+# maxsize=1000, ttl=3600s (1 hour) — old records auto-evicted
+execution_records: TTLCache = TTLCache(maxsize=1000, ttl=3600)
 
 
 # ============== Request/Response Models ==============
@@ -190,6 +193,64 @@ async def execute_workflow_async(request: WorkflowExecuteRequest, background_tas
         "workflow": request.workflow_name,
         "status": "running",
         "message": "工作流已提交后台执行，请轮询 /executions/{execution_id} 获取结果"
+    })
+
+
+# Skill chain mapping (matches frontend SKILL_CHAINS)
+CHAIN_WORKFLOW_MAP = {
+    "from-scratch": "from-scratch",
+    "security-review": "security-review",
+    "prd-package": "prd-package",
+}
+
+
+class WorkflowChainExecuteRequest(BaseModel):
+    chain_id: str = Field(..., min_length=1, description="技能链ID")
+    inputs: Dict[str, Any] = Field(default_factory=dict, description="初始输入参数")
+    project_id: Optional[str] = Field(default=None, description="关联项目ID")
+    context: Optional[Dict[str, str]] = Field(default=None, description="执行上下文")
+
+
+@router.post("/execute-chain", response_model=dict)
+async def execute_skill_chain(request: WorkflowChainExecuteRequest, background_tasks: BackgroundTasks):
+    """执行技能链
+
+    根据 chain_id 映射到对应的工作流定义，在后台异步执行。
+    返回 execution_id，前端轮询 /executions/{execution_id} 获取进度和结果。
+    """
+    workflow_name = CHAIN_WORKFLOW_MAP.get(request.chain_id)
+    if not workflow_name:
+        raise HTTPException(status_code=404, detail=f"技能链 {request.chain_id} 不存在")
+
+    if workflow_name not in STANDARD_WORKFLOWS:
+        raise HTTPException(status_code=404, detail=f"工作流 {workflow_name} 未注册")
+
+    execution_id = str(uuid.uuid4())
+    execution_records[execution_id] = {
+        "execution_id": execution_id,
+        "workflow": workflow_name,
+        "chain_id": request.chain_id,
+        "project_id": request.project_id,
+        "status": "running",
+        "context": request.context,
+        "started_at": time.time(),
+    }
+
+    background_tasks.add_task(
+        _run_workflow_background,
+        execution_id,
+        workflow_name,
+        request.inputs,
+        request.project_id,
+        request.context,
+    )
+
+    return ResponseBuilder.success({
+        "execution_id": execution_id,
+        "chain_id": request.chain_id,
+        "workflow": workflow_name,
+        "status": "running",
+        "message": "技能链已提交后台执行，请轮询 /executions/{execution_id} 获取结果"
     })
 
 

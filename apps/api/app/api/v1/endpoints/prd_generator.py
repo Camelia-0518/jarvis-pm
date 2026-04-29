@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
 from app.services.prd_generator import prd_generator_service
+from app.core.responses import ResponseBuilder
 
 router = APIRouter()
 
@@ -210,20 +211,18 @@ async def quick_generate(description: str, product_name: Optional[str] = None):
         )
 
         if not result["success"]:
-            return {
-                "success": False,
-                "error": result.get("error", "生成失败"),
-                "execution_time": result.get("execution_time", 0)
-            }
+            return ResponseBuilder.error(
+                code="PRD_GENERATION_FAILED",
+                message=result.get("error", "生成失败")
+            )
 
-        return {
-            "success": True,
+        return ResponseBuilder.success({
             "content": result["content"],
             "metadata": result["metadata"],
             "obsidian_path": result.get("obsidian_result", {}).get("file_path") if result.get("obsidian_result") else None,
             "local_path": result.get("local_path"),
             "execution_time": result["execution_time"]
-        }
+        })
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"生成PRD失败: {str(e)}")

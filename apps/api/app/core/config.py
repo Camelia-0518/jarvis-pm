@@ -1,5 +1,6 @@
 """Application configuration"""
 
+from pathlib import Path
 from pydantic import model_validator
 from pydantic_settings import BaseSettings
 from typing import List
@@ -39,14 +40,17 @@ class Settings(BaseSettings):
 
     # AI/LLM - Alternative providers
     ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_BASE_URL: str = "https://api.anthropic.com"
     ANTHROPIC_MODEL: str = "claude-3-5-sonnet-20241022"
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = "gpt-4"
 
-    # Default AI provider (kimi/claude/openai/mock)
-    DEFAULT_AI_PROVIDER: str = "kimi"
+    # Default AI provider (kimi/claude/anthropic/openai)
+    # IMPORTANT: "mock" is removed from defaults. Set a real provider to get actual AI responses.
+    # NOTE: For Kimi For Coding, use "claude" or "anthropic" (OpenAI format is not supported).
+    DEFAULT_AI_PROVIDER: str = "claude"
     DEFAULT_AI_MODEL: str = "k2.6-code-preview"
-    DEFAULT_LLM_PROVIDER: str = "mock"  # mock/kimi/openai/anthropic
+    DEFAULT_LLM_PROVIDER: str = "anthropic"  # kimi/openai/anthropic — NEVER mock for real usage
 
     # Cache configuration
     CACHE_TTL: int = 3600  # 1 hour
@@ -79,7 +83,7 @@ class Settings(BaseSettings):
         return self
 
     class Config:
-        env_file = ".env"
+        env_file = str(Path(__file__).parent.parent.parent / ".env")
         env_file_encoding = "utf-8"
 
 
