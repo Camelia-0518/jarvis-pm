@@ -1,21 +1,27 @@
 """PRD endpoints with real AI generation"""
 
 import asyncio
+import logging
 import base64
+import difflib
 import json
 import os
 import re
 import uuid
+from datetime import datetime, timezone
 from io import BytesIO
-from typing import Optional, List, Dict
-from fastapi import APIRouter, Depends, Query
+from typing import Optional, List, Dict, Any
+from fastapi import APIRouter, Depends, Query, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
-from sqlalchemy.orm import selectinload
+
+from app.core.html_sanitizer import sanitize_html
+
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.responses import ResponseBuilder
 from app.core.security import get_current_user_id
 from app.services.ai_service import ai_service
@@ -24,11 +30,12 @@ from app.models.prd_version import PRDVersion
 from app.models.project import Project
 from app.models.persona import Persona
 from app.models.competitor import Competitor
+from app.core.exceptions import AppException
 
 router = APIRouter()
 
 
-def prd_json_to_markdown(data: dict, title: str) -> str:
+def prd_json_to_markdown(data: Dict[str, Any], title: str) -> str:
     """Convert AI-generated PRD JSON to markdown"""
     md = [f"# {title}"]
 
@@ -188,8 +195,10 @@ class PRDGenerateRequest(BaseModel):
     chapter: str
     prompt: str
     context: Optional[dict] = None
+    bypass_cache: bool = False
 
 
+@rate_limit(requests=100, window=60)
 @router.get("", response_model=dict)
 async def list_prds(
     project_id: Optional[str] = None,
@@ -199,7 +208,7 @@ async def list_prds(
     db: AsyncSession = Depends(get_db)
 ):
     """List PRDs with pagination"""
-    base_query = select(PRD).where(PRD.created_by == user_id)
+    base_query = select(PRD).where(PRD.created_by == user_id, PRD.deleted_at.is_(None))
     if project_id:
         base_query = base_query.where(PRD.project_id == project_id)
     base_query = base_query.order_by(desc(PRD.created_at))
@@ -216,12 +225,15 @@ async def list_prds(
 
     items = []
     for prd in prds:
+        ai_gen = prd.ai_generated or {}
+        doc_type = ai_gen.get("doc_type", "prd") if isinstance(ai_gen, dict) else "prd"
         items.append({
             "id": prd.id,
             "project_id": prd.project_id,
             "title": prd.title,
             "version": prd.version,
             "status": prd.status.value,
+            "doc_type": doc_type,
             "created_at": prd.created_at.isoformat() if prd.created_at else None,
             "updated_at": prd.updated_at.isoformat() if prd.updated_at else None,
         })
@@ -238,47 +250,47 @@ async def list_prds(
 # Each template adds/removes chapters to match industry needs
 TEMPLATE_CHAPTERS = {
     "default": [
-        "1. 背景与目标",
-        "2. 用户故事",
-        "3. 业务流程",
-        "4. 功能规格",
-        "5. 数据架构",
-        "6. 合规要求",
-        "7. 数据埋点",
-        "8. 里程碑",
+        "背景与目标",
+        "用户故事",
+        "业务流程",
+        "功能规格",
+        "数据架构",
+        "合规要求",
+        "数据埋点",
+        "里程碑",
     ],
     "medical": [
-        "1. 背景与目标",
-        "2. 用户故事",
-        "3. 业务流程",
-        "4. 功能规格",
-        "5. 数据架构",
-        "6. 合规要求",
-        "7. 多院区适配",
-        "8. 数据埋点",
-        "9. 里程碑",
+        "背景与目标",
+        "用户故事",
+        "业务流程",
+        "功能规格",
+        "数据架构",
+        "合规要求",
+        "多院区适配",
+        "数据埋点",
+        "里程碑",
     ],
     "saas": [
-        "1. 背景与目标",
-        "2. 用户故事",
-        "3. 业务流程",
-        "4. 功能规格",
-        "5. 数据架构",
-        "6. 合规要求",
-        "7. 租户与计费模型",
-        "8. 数据埋点",
-        "9. 里程碑",
+        "背景与目标",
+        "用户故事",
+        "业务流程",
+        "功能规格",
+        "数据架构",
+        "合规要求",
+        "租户与计费模型",
+        "数据埋点",
+        "里程碑",
     ],
     "ecommerce": [
-        "1. 背景与目标",
-        "2. 用户故事",
-        "3. 业务流程",
-        "4. 功能规格",
-        "5. 数据架构",
-        "6. 合规要求",
-        "7. 供应链与促销策略",
-        "8. 数据埋点",
-        "9. 里程碑",
+        "背景与目标",
+        "用户故事",
+        "业务流程",
+        "功能规格",
+        "数据架构",
+        "合规要求",
+        "供应链与促销策略",
+        "数据埋点",
+        "里程碑",
     ],
 }
 
@@ -325,6 +337,7 @@ TEMPLATE_FRAMEWORK = {
 }
 
 
+@rate_limit(requests=30, window=60)
 @router.post("", response_model=dict)
 async def create_prd(
     data: PRDCreateRequest,
@@ -402,6 +415,7 @@ async def create_prd(
     })
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/{prd_id}", response_model=dict)
 async def get_prd(
     prd_id: str,
@@ -410,12 +424,12 @@ async def get_prd(
 ):
     """Get PRD by ID"""
     result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = result.scalar_one_or_none()
 
     if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
 
     return ResponseBuilder.success({
         "id": prd.id,
@@ -430,68 +444,124 @@ async def get_prd(
     })
 
 
+async def _run_compliance_check(prd_id: str, title: str, industry: str, markdown: str):
+    """Background task: run compliance check after PRD update"""
+    try:
+        from app.agents.agents.compliance_checker import ComplianceChecker
+        checker = ComplianceChecker()
+        result = await checker.execute({
+            "product_name": title,
+            "industry": industry,
+            "features": [markdown[:5000]],  # Truncate for analysis
+        })
+        if result.success:
+            logging.info("Compliance check passed for PRD %s", prd_id)
+        else:
+            logging.warning("Compliance check found issues for PRD %s: %s", prd_id, result.error)
+    except Exception:
+        logging.exception("Compliance check failed for PRD %s", prd_id)
+
+
+async def _index_prd_in_background(source_id: str, content: str, metadata: dict):
+    """Background task: index PRD content with its own DB session"""
+    from app.core.database import AsyncSessionLocal
+    from app.services.memory_indexer import memory_indexer
+    async with AsyncSessionLocal() as db:
+        try:
+            await memory_indexer.index_document(
+                db=db,
+                source_type="prd",
+                source_id=source_id,
+                content=content,
+                metadata=metadata,
+            )
+        except Exception:
+            logging.exception("Failed to index PRD %s into memory", source_id)
+
+
+@rate_limit(requests=30, window=60)
 @router.put("/{prd_id}", response_model=dict)
 async def update_prd(
     prd_id: str,
     data: PRDUpdateRequest,
+    background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db)
 ):
     """Update PRD"""
     result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = result.scalar_one_or_none()
 
     if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
 
     # Create version snapshot before update (if content changed)
     if data.markdown is not None or data.content is not None:
-        version_count = await db.execute(
-            select(func.count()).where(PRDVersion.prd_id == prd_id)
+        # Debounce: only create version if last one is > 60s old
+        last_ver_result = await db.execute(
+            select(PRDVersion.created_at)
+            .where(PRDVersion.prd_id == prd_id)
+            .order_by(PRDVersion.version_number.desc())
+            .limit(1)
         )
-        next_version = (version_count.scalar() or 0) + 1
+        last_ver_time = last_ver_result.scalar_one_or_none()
+        now = datetime.now(timezone.utc)
+        # SQLite returns naive datetimes; make aware for safe subtraction
+        if last_ver_time is not None and last_ver_time.tzinfo is None:
+            last_ver_time = last_ver_time.replace(tzinfo=timezone.utc)
 
-        version = PRDVersion(
-            prd_id=prd_id,
-            version_number=next_version,
-            title=prd.title,
-            markdown=prd.markdown or "",
-            content=json.dumps(prd.content) if prd.content else "",
-            created_by=user_id,
-        )
-        db.add(version)
+        if not last_ver_time or (now - last_ver_time).total_seconds() > 60:
+            version_count = await db.execute(
+                select(func.count()).where(PRDVersion.prd_id == prd_id)
+            )
+            next_version = (version_count.scalar() or 0) + 1
+
+            version = PRDVersion(
+                prd_id=prd_id,
+                version_number=next_version,
+                title=prd.title,
+                markdown=prd.markdown or "",
+                content=json.dumps(prd.content) if prd.content else "",
+                created_by=user_id,
+            )
+            db.add(version)
 
     if data.title is not None:
         prd.title = data.title
     if data.content is not None:
         prd.content = data.content
     if data.markdown is not None:
-        prd.markdown = data.markdown
+        prd.markdown = sanitize_html(data.markdown)
     if data.status is not None:
         try:
             prd.status = PRDStatus(data.status)
         except ValueError:
-            return ResponseBuilder.error(code="INVALID_STATUS", message=f"Invalid status: {data.status}")
+            raise AppException(f"Invalid status: {data.status}", code="INVALID_STATUS", status_code=400)
 
     await db.commit()
     await db.refresh(prd)
 
-    # Index PRD content into semantic memory
+    # Trigger incremental compliance check when content changes
     if data.markdown is not None:
-        try:
-            from app.services.memory_indexer import memory_indexer
-            await memory_indexer.index_document(
-                db=db,
-                source_type="prd",
-                source_id=prd_id,
-                content=data.markdown,
-                metadata={"title": prd.title, "project_id": prd.project_id},
-            )
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("Failed to index PRD into memory: %s", e)
+        industry = prd.content.get("industry", "general") if isinstance(prd.content, dict) else "general"
+        background_tasks.add_task(
+            _run_compliance_check,
+            prd_id=prd.id,
+            title=prd.title,
+            industry=industry,
+            markdown=prd.markdown or "",
+        )
+
+    # Index PRD content into semantic memory (background task with its own DB session)
+    if data.markdown is not None:
+        background_tasks.add_task(
+            _index_prd_in_background,
+            source_id=prd_id,
+            content=data.markdown,
+            metadata={"title": prd.title, "project_id": prd.project_id},
+        )
 
     return ResponseBuilder.success({
         "id": prd.id,
@@ -506,6 +576,7 @@ async def update_prd(
     })
 
 
+@rate_limit(requests=20, window=60)
 @router.delete("/{prd_id}", response_model=dict)
 async def delete_prd(
     prd_id: str,
@@ -514,14 +585,14 @@ async def delete_prd(
 ):
     """Delete PRD"""
     result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = result.scalar_one_or_none()
 
     if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
 
-    await db.delete(prd)
+    prd.soft_delete()
     await db.commit()
 
     return ResponseBuilder.success({
@@ -530,131 +601,40 @@ async def delete_prd(
     })
 
 
-@router.post("/{prd_id}/generate", response_model=dict)
-async def generate_prd_content(
-    prd_id: str,
-    data: PRDGenerateRequest,
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db)
+@rate_limit(requests=10, window=60)
+async def _summarize_chapter_in_background(
+    prd_id: str, chapter_id: str, markdown: str, chapter_title: str
 ):
-    """Generate PRD content using AI"""
-    result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
-    )
-    prd = result.scalar_one_or_none()
-
-    if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
-
-    industry = prd.content.get("industry", "general") if prd.content else "general"
-
-    # Fetch project info, personas, and competitors for richer AI context
-    project_context = {}
-    if prd.project_id:
-        proj_result = await db.execute(select(Project).where(Project.id == prd.project_id))
-        project = proj_result.scalar_one_or_none()
-        if project:
-            project_context = {
-                "project_name": project.name,
-                "project_description": project.description or "",
-                "project_industry": project.industry or industry,
-            }
-
-        # Fetch personas
-        personas_result = await db.execute(
-            select(Persona).where(Persona.project_id == prd.project_id)
-        )
-        personas_list = personas_result.scalars().all()
-        if personas_list:
-            project_context["personas"] = [
-                {
-                    "name": p.name,
-                    "role": p.role,
-                    "description": p.description or "",
-                    "pain_points": p.pain_points or "",
-                    "goals": p.goals or "",
-                    "scenarios": p.scenarios or "",
-                }
-                for p in personas_list
-            ]
-
-        # Fetch competitors
-        competitors_result = await db.execute(
-            select(Competitor).where(Competitor.project_id == prd.project_id)
-        )
-        competitors_list = competitors_result.scalars().all()
-        if competitors_list:
-            project_context["competitors"] = [
-                {
-                    "name": c.name,
-                    "description": c.description or "",
-                    "strengths": c.strengths or "",
-                    "weaknesses": c.weaknesses or "",
-                    "features": c.features or [],
-                    "pricing": c.pricing or "",
-                    "market_position": c.market_position or "",
-                }
-                for c in competitors_list
-            ]
-
-    # Resolve actual chapter title from the PRD's template structure
-    chapter_title = None
-    if prd.content and isinstance(prd.content, dict):
-        chapters = prd.content.get("chapters", {})
-        if data.chapter in chapters and isinstance(chapters[data.chapter], dict):
-            chapter_title = chapters[data.chapter].get("title")
-
-    # Merge PRD ai_generated metadata with project context
-    ai_context = dict(prd.ai_generated) if prd.ai_generated else {}
-    ai_context.update(project_context)
-
-    try:
-        ai_result = await ai_service.generate_prd_chapter(
-            chapter=data.chapter,
-            prompt=data.prompt,
-            context=ai_context,
-            industry=industry,
-            chapter_title=chapter_title,
-        )
-    except Exception as e:
-        return ResponseBuilder.error(code="AI_GENERATION_FAILED", message=str(e))
-
-    # Update PRD content
-    content = prd.content or {"chapters": {}, "template": "standard", "industry": industry}
-    content["chapters"] = content.get("chapters", {})
-    sections = ai_result.get("content", {}).get("sections", [{}])
-    section_title = sections[0].get("title", f"Chapter {data.chapter}") if sections else f"Chapter {data.chapter}"
-    content["chapters"][data.chapter] = {
-        "title": section_title,
-        "content": ai_result.get("markdown", ""),
-        "status": "generated"
-    }
-
-    # Append to markdown
-    existing_md = prd.markdown or ""
-    new_md = ai_result.get("markdown", "")
-    prd.markdown = existing_md + "\n\n" + new_md if existing_md else new_md
-    prd.content = content
-
-    await db.commit()
-
-    return ResponseBuilder.success({
-        "chapter": data.chapter,
-        "content": ai_result.get("content", {}),
-        "markdown": ai_result.get("markdown", ""),
-    })
+    """Background task: summarize a generated chapter for cross-chapter context."""
+    from app.core.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as session:
+        try:
+            summary = await ai_service.summarize_chapter(markdown, chapter_title)
+            if summary:
+                result = await session.execute(
+                    select(PRD).where(PRD.id == prd_id, PRD.deleted_at.is_(None))
+                )
+                prd_record = result.scalar_one_or_none()
+                if prd_record:
+                    content = prd_record.content or {}
+                    content.setdefault("chapters", {}).setdefault(chapter_id, {})["summary"] = summary
+                    prd_record.content = content
+                    await session.commit()
+        except Exception:
+            logging.exception("Background summarization failed for PRD %s chapter %s", prd_id, chapter_id)
 
 
 @router.post("/{prd_id}/generate-stream")
 async def generate_prd_stream(
     prd_id: str,
     data: PRDGenerateRequest,
+    background_tasks: BackgroundTasks,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db),
 ):
     """Stream PRD chapter generation using SSE"""
     result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = result.scalar_one_or_none()
 
@@ -665,10 +645,17 @@ async def generate_prd_stream(
 
     industry = prd.content.get("industry", "general") if prd.content else "general"
 
-    # Fetch project info, personas, and competitors for richer AI context
+    # Fetch project info, personas, and competitors concurrently
     project_context = {}
     if prd.project_id:
-        proj_result = await db.execute(select(Project).where(Project.id == prd.project_id))
+        import asyncio
+        proj_task = db.execute(select(Project).where(Project.id == prd.project_id))
+        personas_task = db.execute(select(Persona).where(Persona.project_id == prd.project_id, Persona.deleted_at.is_(None)))
+        competitors_task = db.execute(select(Competitor).where(Competitor.project_id == prd.project_id, Competitor.deleted_at.is_(None)))
+        proj_result, personas_result, competitors_result = await asyncio.gather(
+            proj_task, personas_task, competitors_task
+        )
+
         project = proj_result.scalar_one_or_none()
         if project:
             project_context = {
@@ -677,10 +664,6 @@ async def generate_prd_stream(
                 "project_industry": project.industry or industry,
             }
 
-        # Fetch personas
-        personas_result = await db.execute(
-            select(Persona).where(Persona.project_id == prd.project_id)
-        )
         personas_list = personas_result.scalars().all()
         if personas_list:
             project_context["personas"] = [
@@ -688,28 +671,16 @@ async def generate_prd_stream(
                     "name": p.name,
                     "role": p.role,
                     "description": p.description or "",
-                    "pain_points": p.pain_points or "",
-                    "goals": p.goals or "",
-                    "scenarios": p.scenarios or "",
                 }
                 for p in personas_list
             ]
 
-        # Fetch competitors
-        competitors_result = await db.execute(
-            select(Competitor).where(Competitor.project_id == prd.project_id)
-        )
         competitors_list = competitors_result.scalars().all()
         if competitors_list:
             project_context["competitors"] = [
                 {
                     "name": c.name,
                     "description": c.description or "",
-                    "strengths": c.strengths or "",
-                    "weaknesses": c.weaknesses or "",
-                    "features": c.features or [],
-                    "pricing": c.pricing or "",
-                    "market_position": c.market_position or "",
                 }
                 for c in competitors_list
             ]
@@ -724,6 +695,27 @@ async def generate_prd_stream(
     # Merge PRD ai_generated metadata with project context
     ai_context = dict(prd.ai_generated) if prd.ai_generated else {}
     ai_context.update(project_context)
+
+    # Build cross-chapter context from already-generated chapters for consistency.
+    # For Chapter 1 always use raw content (it contains critical decision tables in markdown format).
+    # For other chapters prefer AI-generated summary; fallback to raw content truncated to 3000 chars.
+    existing_chapters: Dict[str, str] = {}
+    if prd.content and isinstance(prd.content, dict):
+        all_chapters = prd.content.get("chapters", {})
+        for cid, cinfo in all_chapters.items():
+            if cid != data.chapter and isinstance(cinfo, dict) and cinfo.get("status") == "generated":
+                raw = cinfo.get("content", "")
+                # Chapter 1 contains role tables, MVP boundary, metrics in markdown format.
+                # Summary is plain text without table delimiters, so extraction methods fail.
+                # Always use raw content for Chapter 1 to ensure structured data can be parsed.
+                if cid == "1" and raw:
+                    existing_chapters[cid] = raw[:4000] if len(raw) > 4000 else raw
+                else:
+                    summary = cinfo.get("summary", "")
+                    if summary and len(summary.strip()) > 50:
+                        existing_chapters[cid] = summary
+                    else:
+                        existing_chapters[cid] = raw[:3000] if len(raw) > 3000 else raw
 
     async def event_generator():
         import asyncio
@@ -735,25 +727,43 @@ async def generate_prd_stream(
                 context=ai_context,
                 industry=industry,
                 chapter_title=chapter_title,
+                existing_chapters=existing_chapters if existing_chapters else None,
+                bypass_cache=data.bypass_cache,
             ):
                 full_markdown += chunk
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
                 await asyncio.sleep(0)  # Force event loop yield so data flushes to network
 
-            # Save to DB after stream completes — only update content structure,
-            # markdown is managed by the frontend via update API
+            # Save to DB after stream completes.
+            # prd.content[chapters] = structured storage (summary, status, per-chapter content)
+            # prd.markdown = canonical user-facing document, managed by the frontend via PUT /{id}
+            # The frontend receives cleaned_markdown in the "done" SSE event and
+            # persists it separately via prdApi.update(); this dual-write ensures
+            # the structured backup survives even if the frontend save fails.
+            cleaned_markdown = ai_service._clean_prd_output(full_markdown)
             content = prd.content or {"chapters": {}, "template": "standard", "industry": industry}
             content["chapters"] = content.get("chapters", {})
             content["chapters"][data.chapter] = {
                 "title": chapter_title or f"Chapter {data.chapter}",
-                "content": full_markdown,
+                "content": cleaned_markdown,
                 "status": "generated"
             }
 
             prd.content = content
             await db.commit()
 
-            yield f"data: {json.dumps({'type': 'done', 'markdown': full_markdown})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'markdown': cleaned_markdown})}\n\n"
+
+            # Schedule summarization as a background task so it's not tied to
+            # the SSE connection lifecycle (avoids GeneratorExit cancellation)
+            background_tasks.add_task(
+                _summarize_chapter_in_background,
+                prd_id=prd_id,
+                chapter_id=data.chapter,
+                markdown=cleaned_markdown,
+                chapter_title=chapter_title or f"Chapter {data.chapter}",
+            )
+
         except Exception as e:
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
@@ -773,7 +783,7 @@ async def generate_prd_stream(
 def _markdown_to_docx(markdown_text: str, title: str) -> bytes:
     """Convert markdown text to DOCX bytes."""
     from docx import Document
-    from docx.shared import Inches, Pt, RGBColor
+    from docx.shared import Inches, Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
 
     doc = Document()
@@ -1045,6 +1055,7 @@ def _write_pdf_formatted_text(pdf, text: str):
             pdf.write(5, part)
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/{prd_id}/export", response_model=dict)
 async def export_prd(
     prd_id: str,
@@ -1054,12 +1065,12 @@ async def export_prd(
 ):
     """Export PRD in various formats: markdown, json, pdf, docx."""
     result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = result.scalar_one_or_none()
 
     if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
 
     if format == "json":
         content = json.dumps(prd.ai_generated, ensure_ascii=False, indent=2)
@@ -1082,7 +1093,7 @@ async def export_prd(
                 "filename": f"prd_{prd.title or prd_id}.docx"
             })
         except Exception as e:
-            return ResponseBuilder.error(code="EXPORT_ERROR", message=f"DOCX export failed: {str(e)}")
+            raise AppException(f"DOCX export failed: {str(e)}", code="EXPORT_ERROR", status_code=500)
 
     if format == "pdf":
         try:
@@ -1095,7 +1106,7 @@ async def export_prd(
                 "filename": f"prd_{prd.title or prd_id}.pdf"
             })
         except Exception as e:
-            return ResponseBuilder.error(code="EXPORT_ERROR", message=f"PDF export failed: {str(e)}")
+            raise AppException(f"PDF export failed: {str(e)}", code="EXPORT_ERROR", status_code=500)
 
     # Default: markdown
     return ResponseBuilder.success({
@@ -1107,6 +1118,7 @@ async def export_prd(
 
 # ============== Version History ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("/{prd_id}/versions", response_model=dict)
 async def list_prd_versions(
     prd_id: str,
@@ -1118,11 +1130,11 @@ async def list_prd_versions(
     """List PRD version history"""
     # Verify PRD ownership
     prd_result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = prd_result.scalar_one_or_none()
     if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
 
     query = select(PRDVersion).where(PRDVersion.prd_id == prd_id).order_by(desc(PRDVersion.created_at))
     total_result = await db.execute(select(func.count()).select_from(query.subquery()))
@@ -1146,6 +1158,7 @@ async def list_prd_versions(
     )
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/{prd_id}/versions/{version_id}", response_model=dict)
 async def get_prd_version(
     prd_id: str,
@@ -1155,18 +1168,18 @@ async def get_prd_version(
 ):
     """Get a specific PRD version"""
     prd_result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = prd_result.scalar_one_or_none()
     if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
 
     result = await db.execute(
         select(PRDVersion).where(PRDVersion.id == version_id, PRDVersion.prd_id == prd_id)
     )
     version = result.scalar_one_or_none()
     if not version:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Version not found")
+        raise AppException("Version not found", code="NOT_FOUND", status_code=404)
 
     return ResponseBuilder.success({
         "id": version.id,
@@ -1178,6 +1191,7 @@ async def get_prd_version(
     })
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/{prd_id}/versions/{version_id}/restore", response_model=dict)
 async def restore_prd_version(
     prd_id: str,
@@ -1187,18 +1201,18 @@ async def restore_prd_version(
 ):
     """Restore PRD to a specific version"""
     prd_result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id)
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
     )
     prd = prd_result.scalar_one_or_none()
     if not prd:
-        return ResponseBuilder.error(code="NOT_FOUND", message="PRD not found")
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
 
     result = await db.execute(
         select(PRDVersion).where(PRDVersion.id == version_id, PRDVersion.prd_id == prd_id)
     )
     version = result.scalar_one_or_none()
     if not version:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Version not found")
+        raise AppException("Version not found", code="NOT_FOUND", status_code=404)
 
     # Create a new version snapshot of current state before restoring
     version_count = await db.execute(
@@ -1232,4 +1246,121 @@ async def restore_prd_version(
         "message": f"Restored to version {version.version_number}",
         "prd_id": prd.id,
         "restored_version": version.version_number,
+    })
+
+
+@rate_limit(requests=100, window=60)
+@router.get("/{prd_id}/generation-progress", response_model=dict)
+async def get_generation_progress(
+    prd_id: str,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get PRD chapter generation progress"""
+    result = await db.execute(
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
+    )
+    prd = result.scalar_one_or_none()
+
+    if not prd:
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
+
+    chapters = {}
+    if prd.content and isinstance(prd.content, dict):
+        chapters = prd.content.get("chapters", {})
+
+    total = len(chapters)
+    generated = sum(1 for c in chapters.values() if isinstance(c, dict) and c.get("status") == "generated")
+    pending = total - generated
+
+    progress = {
+        "total_chapters": total,
+        "generated": generated,
+        "pending": pending,
+        "percentage": round(generated / total * 100, 1) if total else 0,
+        "chapters": [
+            {
+                "id": cid,
+                "title": c.get("title", f"Chapter {cid}") if isinstance(c, dict) else f"Chapter {cid}",
+                "status": c.get("status", "draft") if isinstance(c, dict) else "draft",
+            }
+            for cid, c in chapters.items()
+        ],
+    }
+
+    return ResponseBuilder.success(progress)
+
+
+@rate_limit(requests=100, window=60)
+@router.get("/{prd_id}/diff", response_model=dict)
+async def diff_prd_versions(
+    prd_id: str,
+    from_version: int = Query(..., description="Source version number"),
+    to_version: int = Query(..., description="Target version number"),
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compare two PRD versions and return unified diff"""
+    # Verify PRD ownership
+    prd_result = await db.execute(
+        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
+    )
+    prd = prd_result.scalar_one_or_none()
+    if not prd:
+        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
+
+    # Fetch both versions
+    from_result = await db.execute(
+        select(PRDVersion).where(
+            PRDVersion.prd_id == prd_id,
+            PRDVersion.version_number == from_version
+        )
+    )
+    to_result = await db.execute(
+        select(PRDVersion).where(
+            PRDVersion.prd_id == prd_id,
+            PRDVersion.version_number == to_version
+        )
+    )
+    from_v = from_result.scalar_one_or_none()
+    to_v = to_result.scalar_one_or_none()
+
+    if not from_v or not to_v:
+        missing = []
+        if not from_v:
+            missing.append(str(from_version))
+        if not to_v:
+            missing.append(str(to_version))
+        raise AppException(f"Version(s) not found: {', '.join(missing)}", code="NOT_FOUND", status_code=400)
+
+    from_lines = (from_v.markdown or "").splitlines(keepends=True)
+    to_lines = (to_v.markdown or "").splitlines(keepends=True)
+
+    diff = list(difflib.unified_diff(
+        from_lines,
+        to_lines,
+        fromfile=f"v{from_version}",
+        tofile=f"v{to_version}",
+        lineterm="",
+    ))
+
+    # Also compute a high-level summary
+    added = sum(1 for line in diff if line.startswith("+"))
+    removed = sum(1 for line in diff if line.startswith("-"))
+    unchanged = sum(1 for line in diff if line.startswith(" "))
+
+    return ResponseBuilder.success({
+        "from_version": from_version,
+        "to_version": to_version,
+        "from_title": from_v.title,
+        "to_title": to_v.title,
+        "from_created_at": from_v.created_at.isoformat() if from_v.created_at else None,
+        "to_created_at": to_v.created_at.isoformat() if to_v.created_at else None,
+        "diff": "".join(diff),
+        "summary": {
+            "lines_added": added,
+            "lines_removed": removed,
+            "lines_unchanged": unchanged,
+            "total_changes": added + removed,
+        },
     })
