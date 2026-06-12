@@ -39,8 +39,8 @@ jobs:
             --cov-report=term-missing \
             --cov-fail-under=35
         env:
-          DATABASE_URL: sqlite+aiosqlite:///file:testdb?mode=memory&cache=shared&uri=true
-          DATABASE_URL_SYNC: sqlite:///:memory:
+          DATABASE_URL: "sqlite+aiosqlite:///file:testdb?mode=memory&cache=shared&uri=true"
+          DATABASE_URL_SYNC: "sqlite:///:memory:"
           SECRET_KEY: test-secret-key-not-for-production
           SINGLE_USER_MODE: 'true'
           DEBUG: 'true'
@@ -131,8 +131,8 @@ jobs:
           uvicorn app.main:app --host 0.0.0.0 --port 8000 --env-file .env.example &
           sleep 5
         env:
-          DATABASE_URL: sqlite+aiosqlite:///file:e2e?mode=memory&cache=shared&uri=true
-          DATABASE_URL_SYNC: sqlite:///:memory:
+          DATABASE_URL: "sqlite+aiosqlite:///file:e2e?mode=memory&cache=shared&uri=true"
+          DATABASE_URL_SYNC: "sqlite:///:memory:"
           SECRET_KEY: test-secret-key-not-for-production
           SINGLE_USER_MODE: 'true'
           DEBUG: 'true'
