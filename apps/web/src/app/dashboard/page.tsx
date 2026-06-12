@@ -5,7 +5,7 @@ import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/authStore";
 import { useProjectStore } from "@/stores/projectStore";
-import { projectApi, skillsApi, type Project, type SkillExecutionRecord } from "@/lib/api";
+import { projectApi, skillsApi, jobsApi, type Project, type SkillExecutionRecord, type JobInfo } from "@/lib/api";
 import { toast } from "sonner";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { SkeletonProjectList } from "@/components/ui/Skeleton";
@@ -142,6 +142,9 @@ export default function Dashboard() {
         {/* Retrospective Panel */}
         <RetrospectivePanel />
 
+        {/* Recent Activity */}
+        <RecentJobs />
+
         {/* Projects */}
         <div>
           <div className="mb-4 flex items-center justify-between">
@@ -157,7 +160,7 @@ export default function Dashboard() {
             <div className="text-center py-12 bg-white rounded-xl shadow-sm dark:bg-slate-800">
               <div className="text-4xl mb-4">📁</div>
               <div className="text-slate-600 dark:text-slate-300">暂无项目</div>
-              <div className="text-sm text-slate-400 mt-2">点击"+ 新建项目"开始创建</div>
+              <div className="text-sm text-slate-400 mt-2">点击&ldquo;+ 新建项目&rdquo;开始创建</div>
             </div>
           ) : (
             <div className="grid gap-4 md:grid-cols-2">
@@ -215,6 +218,36 @@ export default function Dashboard() {
 
       <FeedbackModal isOpen={showFeedbackModal} onClose={() => setShowFeedbackModal(false)} />
       <NewProjectModal isOpen={showNewProjectModal} onClose={() => setShowNewProjectModal(false)} />
+    </div>
+  );
+}
+
+function RecentJobs() {
+  const [jobs, setJobs] = useState<JobInfo[]>([]);
+  useEffect(() => {
+    (async () => {
+      try { const res = await jobsApi.list({ limit: 5 }); setJobs(res.items || []); } catch { /* */ }
+    })();
+  }, []);
+  if (!jobs.length) return null;
+  const sc: Record<string, string> = { queued: "text-yellow-600", running: "text-blue-600", succeeded: "text-green-600", failed: "text-red-600" };
+  return (
+    <div className="mb-8 rounded-xl bg-white p-5 shadow-sm dark:bg-slate-800">
+      <div className="flex items-center justify-between mb-3">
+        <h2 className="text-lg font-semibold text-slate-900 dark:text-white">最近动态</h2>
+        <Link href="/jobs" className="text-sm text-sky-600 hover:text-sky-700">全部 →</Link>
+      </div>
+      <div className="space-y-2">
+        {jobs.map((j) => (
+          <div key={j.id} className="flex items-center justify-between border-b border-gray-100 py-1.5 text-sm dark:border-gray-700">
+            <div className="flex items-center gap-2">
+              <span className={`text-xs font-medium ${sc[j.status || ""] || ""}`}>{j.status}</span>
+              <span className="text-gray-600 dark:text-gray-400">{j.job_type}</span>
+            </div>
+            <span className="text-xs text-gray-400">{j.created_at ? new Date(j.created_at).toLocaleString("zh-CN") : ""}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

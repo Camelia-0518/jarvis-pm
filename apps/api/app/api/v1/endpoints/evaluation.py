@@ -6,9 +6,10 @@
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
-from typing import Dict, Any, List, Optional
+from typing import List, Optional
 
-from app.evaluation.metrics.prd_quality import PRDQualityEvaluator, PRDQualityScore
+from app.evaluation.metrics.prd_quality import PRDQualityEvaluator
+from app.core.rate_limit import rate_limit
 from app.evaluation.ab_testing.framework import (
     ABTestFramework, ABTest, TestTemplates, PromptABTestFactory, Variant
 )
@@ -44,6 +45,7 @@ class EvaluatePRDResponse(BaseModel):
     suggestions: List[str]
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/evaluate-prd", response_model=EvaluatePRDResponse)
 async def evaluate_prd(request: EvaluatePRDRequest):
     """
@@ -97,6 +99,7 @@ class ABTestResponse(BaseModel):
     treatment_variant_id: str
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/ab-tests", response_model=ABTestResponse)
 async def create_ab_test(request: CreateABTestRequest):
     """创建A/B测试"""
@@ -125,6 +128,7 @@ async def create_ab_test(request: CreateABTestRequest):
         )
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/ab-tests/{test_id}/start")
 async def start_ab_test(test_id: str):
     """启动A/B测试"""
@@ -138,6 +142,7 @@ async def start_ab_test(test_id: str):
         )
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/ab-tests/{test_id}/results")
 async def get_ab_test_results(test_id: str):
     """获取A/B测试结果"""
@@ -150,6 +155,7 @@ async def get_ab_test_results(test_id: str):
     return results
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/ab-tests")
 async def list_ab_tests(status: Optional[str] = None):
     """列出A/B测试"""
@@ -190,6 +196,7 @@ class SubmitFeedbackRequest(BaseModel):
     feedback_type: str = Field(default="suggestion", description="反馈类型")
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/feedback")
 async def submit_feedback(request: SubmitFeedbackRequest):
     """提交用户反馈"""
@@ -221,6 +228,7 @@ async def submit_feedback(request: SubmitFeedbackRequest):
         )
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/feedback/statistics")
 async def get_feedback_statistics():
     """获取反馈统计"""
@@ -235,6 +243,7 @@ async def get_feedback_statistics():
     }
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/feedback/insights")
 async def get_feedback_insights():
     """获取反馈洞察"""
@@ -243,6 +252,7 @@ async def get_feedback_insights():
 
 # ============ 预置模板 ============
 
+@rate_limit(requests=100, window=60)
 @router.get("/templates/ab-tests")
 async def get_ab_test_templates():
     """获取A/B测试模板"""
@@ -260,6 +270,7 @@ async def get_ab_test_templates():
     ]
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/templates/ab-tests/{template_id}/create")
 async def create_from_template(template_id: str):
     """从模板创建A/B测试"""

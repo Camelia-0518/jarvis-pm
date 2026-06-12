@@ -55,7 +55,7 @@ export default function FeedbackModal({ isOpen, onClose }: Props) {
             <select
               value={feedbackData.category}
               onChange={(e) =>
-                setFeedbackData({ ...feedbackData, category: e.target.value as any })
+                setFeedbackData({ ...feedbackData, category: e.target.value as typeof feedbackData.category })
               }
               className="w-full px-3 py-2 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-sky-500 dark:border-slate-600 dark:bg-slate-700 dark:text-white"
             >

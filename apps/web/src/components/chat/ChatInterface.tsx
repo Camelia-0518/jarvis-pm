@@ -101,7 +101,7 @@ export function ChatInterface() {
         setCurrentConversation(projectConversations[0])
       }
     }
-  }, [currentProject, currentConversation])
+  }, [currentProject, currentConversation, createConversation, getConversationByProject, setCurrentConversation])
 
   // Auto-scroll to bottom
   useEffect(() => {

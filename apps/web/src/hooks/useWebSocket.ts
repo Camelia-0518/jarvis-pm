@@ -289,9 +289,6 @@ export function useWebSocket(
 
   // Connect on mount / params change
   useEffect(() => {
-    // connect() registers async event handlers; setState calls happen
-    // later in onopen/onclose, not synchronously during the effect.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     connect();
 
     return () => {

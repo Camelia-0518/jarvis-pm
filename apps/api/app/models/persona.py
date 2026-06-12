@@ -5,13 +5,13 @@ from sqlalchemy.sql import func
 import uuid
 
 from app.core.database import Base
+from app.models.mixins import SoftDeleteMixin, TimestampMixin
 
 
-class Persona(Base):
+class Persona(Base, SoftDeleteMixin, TimestampMixin):
     """User persona model — structured user profile for PRD context"""
     __tablename__ = "personas"
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     project_id = Column(String, ForeignKey("projects.id"), nullable=False, index=True)
     created_by = Column(String, ForeignKey("users.id"), nullable=False)
 
@@ -23,5 +23,3 @@ class Persona(Base):
     scenarios = Column(Text, nullable=True)         # 使用场景
     demographics = Column(Text, nullable=True)      # 人口统计特征
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

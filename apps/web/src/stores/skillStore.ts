@@ -3,6 +3,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { request as apiRequest } from "@/lib/api";
 import type {
   SkillDefinition,
   SkillExecutionRequest,
@@ -214,19 +215,11 @@ export const useSkillStore = create<SkillState>()(
             },
           };
 
-          const response = await fetch('/api/v1/skills/execute', {
+          const result = await apiRequest<SkillExecutionResponse>('/skills/execute', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
             body: JSON.stringify(request),
+            timeoutMs: 120000,
           });
-
-          if (!response.ok) {
-            throw new Error(`执行失败: ${response.statusText}`);
-          }
-
-          const result: SkillExecutionResponse = await response.json();
 
           // 更新执行记录
           const completedRecord: ExtendedSkillExecutionRecord = {
@@ -313,19 +306,11 @@ export const useSkillStore = create<SkillState>()(
             },
           };
 
-          const response = await fetch('/api/v1/skills/execute-async', {
+          const { executionId: returnedId } = await apiRequest<{ executionId: string }>('/skills/execute-async', {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
             body: JSON.stringify(request),
+            timeoutMs: 120000,
           });
-
-          if (!response.ok) {
-            throw new Error(`启动异步执行失败: ${response.statusText}`);
-          }
-
-          const { executionId: returnedId } = await response.json();
 
           // 更新状态为运行中
           set((state) => ({

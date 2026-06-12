@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { deliveryApi, type DeliveryPlanDetail, type DeliveryPlanSummary, type DeliveryDashboardData } from '@/lib/api';
+import { deliveryApi, type DeliveryPlanDetail, type DeliveryPlanSummary, type DeliveryDashboardData, type WbsTask, type MilestonePhase } from '@/lib/api';
 
 interface DeliveryState {
   // List state
@@ -27,6 +27,8 @@ interface DeliveryState {
   generatePlan: (params: { project_id: string; prd_id?: string; industry?: string; team_size?: number }) => Promise<string | null>;
   generateSingle: (params: { project_id: string; agent_type: 'delivery_planner' | 'risk_manager' | 'stakeholder_coordinator' }) => Promise<Record<string, unknown> | null>;
   updatePlan: (id: string, data: { status?: string; title?: string }) => Promise<void>;
+  updateTask: (planId: string, taskId: string, patch: Record<string, unknown>) => Promise<void>;
+  updatePhase: (planId: string, phaseId: string, patch: Record<string, unknown>) => Promise<void>;
   deletePlan: (id: string) => Promise<void>;
   fetchDashboard: (projectId?: string) => Promise<void>;
   reset: () => void;
@@ -99,11 +101,50 @@ export const useDeliveryStore = create<DeliveryState>((set) => ({
     }
   },
 
-  updatePlan: async (id, data) => {
+  updatePlan: async (id: string, data: { status?: string; title?: string }) => {
     try {
       await deliveryApi.update(id, data);
     } catch (err) {
       console.error('Failed to update plan:', err);
+    }
+  },
+
+  /** Optimistically update a WBS task in the current plan. */
+  updateTask: async (planId: string, taskId: string, patch: Record<string, unknown>) => {
+    const state = useDeliveryStore.getState();
+    if (!state.currentPlan || state.currentPlan.id !== planId) return;
+    const tasks = (state.currentPlan.wbs?.tasks || []) as WbsTask[];
+    const idx = tasks.findIndex((t) => t.id === taskId);
+    if (idx === -1) return;
+    const newTasks = [...tasks];
+    newTasks[idx] = { ...newTasks[idx], ...patch };
+    const newWbs = { ...(state.currentPlan.wbs || {}), tasks: newTasks };
+    set({ currentPlan: { ...state.currentPlan, wbs: newWbs } });
+    try {
+      await deliveryApi.update(planId, { wbs: newWbs });
+    } catch (err) {
+      // Rollback on failure
+      set({ currentPlan: state.currentPlan });
+      console.error('Failed to update task:', err);
+    }
+  },
+
+  /** Optimistically update a milestone phase in the current plan. */
+  updatePhase: async (planId: string, phaseId: string, patch: Record<string, unknown>) => {
+    const state = useDeliveryStore.getState();
+    if (!state.currentPlan || state.currentPlan.id !== planId) return;
+    const phases = (state.currentPlan.milestones?.phases || []) as MilestonePhase[];
+    const idx = phases.findIndex((p) => p.phase_id === phaseId);
+    if (idx === -1) return;
+    const newPhases = [...phases];
+    newPhases[idx] = { ...newPhases[idx], ...patch };
+    const newMs = { ...(state.currentPlan.milestones || {}), phases: newPhases };
+    set({ currentPlan: { ...state.currentPlan, milestones: newMs } });
+    try {
+      await deliveryApi.update(planId, { milestones: newMs });
+    } catch (err) {
+      set({ currentPlan: state.currentPlan });
+      console.error('Failed to update phase:', err);
     }
   },
 

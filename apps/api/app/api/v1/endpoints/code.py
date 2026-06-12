@@ -3,9 +3,12 @@
 提供 PRD 转代码的接口
 """
 
-from fastapi import APIRouter, HTTPException, status, Depends
+import asyncio
+import logging
+
+from fastapi import APIRouter, HTTPException, status, Depends, Request
 from pydantic import BaseModel
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -21,9 +24,12 @@ from app.services.component_generator import (
     generate_components_from_prd,
     get_component_suggestions,
 )
-from app.services.ai_service import ai_service
+from app.services.prototype_ai_service import prototype_ai_service
 from app.core.database import get_db
 from app.core.security import get_current_user_id
+from app.core.tasks import create_task, get_task, start_background_task
+from app.core.rate_limit import rate_limit
+from app.core.html_sanitizer import sanitize_html, validate_prototype_interactions
 from app.models.persona import Persona
 from app.models.competitor import Competitor
 
@@ -91,8 +97,9 @@ class PreviewRequest(BaseModel):
 
 
 # Routes
-@router.post("/prototype", response_model=PrototypeResponse)
-async def generate_prototype(request: PRDRequest):
+@rate_limit(requests=20, window=60)
+@router.post("/prototype")
+async def generate_prototype(request: PRDRequest, http_request: Request):
     """
     从 PRD 生成原型
 
@@ -109,26 +116,26 @@ async def generate_prototype(request: PRDRequest):
 
     try:
         result = generate_prototype_from_prd(request.prd_content)
+        # Sanitize AI-generated HTML to prevent XSS
+        if result.get("files", {}).get("index.html"):
+            result["files"]["index.html"] = sanitize_html(result["files"]["index.html"])
         return result
-    except Exception as e:
+    except Exception:
+        logging.exception("Prototype generation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"原型生成失败: {str(e)}"
+            detail="原型生成失败，请稍后重试"
         )
 
 
-@router.post("/prototype-ai", response_model=PrototypeResponse)
-async def generate_prototype_ai(
-    request: PrototypeAIRequest,
-    user_id: str = Depends(get_current_user_id),
-    db: AsyncSession = Depends(get_db),
-):
+@rate_limit(requests=10, window=60)
+@router.post("/prototype-ai/extract")
+async def extract_prototype_skeleton(request: PrototypeAIRequest, http_request: Request):
     """
-    AI 增强原型生成（调用 Kimi API）
+    从 PRD 提取产品骨架（异步任务）
 
-    - 基于 PRD 内容生成可运行的 HTML 原型
-    - 自动注入项目用户画像和竞品信息
-    - 只使用已配置的 Kimi API，不引入其他服务
+    - 提交异步任务，立刻返回 task_id
+    - 前端轮询 /prototype-ai/tasks/{task_id} 获取进度和结果
     """
     if not request.prd_content or len(request.prd_content.strip()) < 50:
         raise HTTPException(
@@ -136,13 +143,118 @@ async def generate_prototype_ai(
             detail="PRD 内容太短，请提供完整的 PRD 文档"
         )
 
-    # 收集项目上下文
+    task_id = await create_task(
+        prd_content=request.prd_content,
+        options=request.options or {},
+    )
+
+    await start_background_task(
+        task_id=task_id,
+        coro=prototype_ai_service.extract_skeleton,
+    )
+
+    return {
+        "task_id": task_id,
+        "message": "骨架提取任务已提交，请轮询查询进度",
+    }
+
+
+@rate_limit(requests=100, window=60)
+@router.get("/prototype-ai/tasks/{task_id}")
+async def get_prototype_task(task_id: str):
+    """查询异步原型任务状态"""
+    task = await get_task(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="任务不存在"
+        )
+
+    return {
+        "task_id": task["task_id"],
+        "status": task["status"],
+        "skeleton": task.get("skeleton"),
+        "html": task.get("html"),
+        "report": task.get("report"),
+        "error": task.get("error"),
+        "created_at": task["created_at"],
+        "updated_at": task["updated_at"],
+    }
+
+
+@rate_limit(requests=10, window=60)
+@router.post("/prototype-ai/sync")
+async def generate_prototype_ai_sync(request: PrototypeAIRequest, http_request: Request):
+    """
+    AI 增强原型生成 - 非流式一次性返回
+
+    - 基于骨架生成高保真原型
+    - 一次性返回完整 HTML 和生成报告
+    - 支持缓存，相同骨架秒级复用
+    """
+    if not request.prd_content or len(request.prd_content.strip()) < 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PRD 内容太短，请提供完整的 PRD 文档"
+        )
+
+    # 如果没有提供骨架，先自动提取
+    skeleton = request.options.get("skeleton") if request.options else None
+    if not skeleton:
+        skeleton = await prototype_ai_service.extract_skeleton(
+            request.prd_content,
+            request.options or {},
+        )
+
+    style = (request.options or {}).get("style", "high-fidelity")
+
+    # 收集所有事件，拼接完整 HTML
+    html_parts: list[str] = []
+    report: Dict[str, Any] = {}
+    async for event in prototype_ai_service.generate_prototype_stream(skeleton, {"style": style}):
+        if event["event"] == "chunk":
+            html_parts.append(event["data"])
+        elif event["event"] == "done":
+            report = event["data"].get("report", {})
+    html = "".join(html_parts)
+
+    return {
+        "html": sanitize_html(html),
+        "report": report,
+    }
+
+
+@rate_limit(requests=10, window=60)
+@router.post("/prototype-ai")
+async def generate_prototype_ai(
+    request: PrototypeAIRequest,
+    http_request: Request,
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    AI 增强原型生成（调用 Kimi API）- 兼容旧接口
+
+    - 基于 PRD 内容生成可运行的 HTML 原型
+    - 自动注入项目用户画像和竞品信息
+    - 内部走新流水线：提取骨架 → 生成原型
+    """
+    if not request.prd_content or len(request.prd_content.strip()) < 50:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PRD 内容太短，请提供完整的 PRD 文档"
+        )
+
+    # 收集项目上下文（验证归属）
     personas_text = ""
     competitors_text = ""
     if request.project_id:
         try:
+            from app.core.permissions import require_project_owner
+            proj = await require_project_owner(db, request.project_id, user_id)
+
             persona_result = await db.execute(
-                select(Persona).where(Persona.project_id == request.project_id)
+                select(Persona).where(Persona.project_id == request.project_id, Persona.deleted_at.is_(None))
             )
             personas = persona_result.scalars().all()
             if personas:
@@ -152,7 +264,7 @@ async def generate_prototype_ai(
                 ])
 
             competitor_result = await db.execute(
-                select(Competitor).where(Competitor.project_id == request.project_id)
+                select(Competitor).where(Competitor.project_id == request.project_id, Competitor.deleted_at.is_(None))
             )
             competitors = competitor_result.scalars().all()
             if competitors:
@@ -160,75 +272,70 @@ async def generate_prototype_ai(
                     f"- {c.name}: {c.description or ''} 优势: {c.strengths or ''} 定价: {c.pricing or ''}"
                     for c in competitors
                 ])
-        except Exception:
-            pass  # 忽略查询失败，继续生成
+        except Exception as e:
+            logging.warning("Failed to load project context for PRD enrichment: %s", e)
 
-    # 构建 prompt
-    context_parts = ["基于以下 PRD 内容生成一个可交互的前端原型页面："]
-    context_parts.append(f"\nPRD 内容:\n{request.prd_content[:3000]}")  # 限制长度
-
+    # 将上下文附加到 PRD 中
+    enriched_prd = request.prd_content
     if personas_text:
-        context_parts.append(f"\n目标用户画像:\n{personas_text}")
+        enriched_prd += f"\n\n【用户画像】\n{personas_text}"
     if competitors_text:
-        context_parts.append(f"\n竞品参考:\n{competitors_text}")
-
-    prompt = "\n".join(context_parts) + """
-
-要求：
-1. 输出一个完整的、可独立运行的 HTML 文件
-2. 使用 Tailwind CSS CDN（https://cdn.tailcdn.com）进行样式设计
-3. 包含所有必要的 HTML 结构、内联 CSS 和内联 JavaScript
-4. 原型应体现 PRD 中描述的核心业务流程和关键页面
-5. 如果是医疗行业，界面应体现专业、简洁、可信赖的风格
-6. 如果是 SaaS/电商行业，界面应体现现代、清晰、易用的风格
-7. 包含模拟数据和交互（如表单填写、页面切换、弹窗等）
-8. 使用中文界面
-9. 确保代码在浏览器中可直接打开运行
-
-请直接输出 HTML 代码，用 ```html 和 ``` 包裹。"""
+        enriched_prd += f"\n\n【竞品信息】\n{competitors_text}"
 
     try:
-        content = await ai_service.chat(
-            prompt,
-            {"max_tokens": 8000, "system_prompt": "你是一位资深前端工程师，擅长用 HTML + Tailwind CSS 快速构建高保真产品原型。你输出的是可直接运行的代码，不是设计建议。"}
-        )
+        # 新流水线：提取骨架 → 生成原型
+        skeleton = await prototype_ai_service.extract_skeleton(enriched_prd, request.options or {})
 
-        # 提取 HTML 代码块
-        html_code = content
-        if "```html" in content:
-            html_code = content.split("```html")[1].split("```")[0].strip()
-        elif "```" in content:
-            html_code = content.split("```")[1].split("```")[0].strip()
+        html_parts: list[str] = []
+        report: Dict[str, Any] = {}
+        async for event in prototype_ai_service.generate_prototype_stream(skeleton, request.options or {}):
+            if event["event"] == "chunk":
+                html_parts.append(event["data"])
+            elif event["event"] == "done":
+                report = event["data"].get("report", {})
+            elif event["event"] == "error":
+                raise Exception(event["data"].get("message", "生成失败"))
+        html_code = "".join(html_parts)
 
-        # 如果没有找到代码块，使用原始内容
-        if not html_code.strip():
-            html_code = content
+        # 构建页面列表
+        pages = []
+        for i, p in enumerate(report.get("page_list", [])):
+            pages.append({
+                "name": p["name"],
+                "route": f"/{p['name']}",
+                "title": p["name"],
+            })
+        if not pages:
+            pages = [{"name": "index", "route": "/", "title": "原型首页"}]
 
-        # 确保包含基础 HTML 结构
-        if not html_code.strip().startswith("<"):
-            html_code = f"<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"UTF-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n<title>原型预览</title>\n<script src=\"https://cdn.tailwindcss.com\"></script>\n</head>\n<body class=\"bg-gray-50\">\n{html_code}\n</body>\n</html>"
+        # Validate prototype interactions
+        interaction_report = validate_prototype_interactions(html_code)
 
         return {
             "files": {
-                "index.html": html_code,
+                "index.html": sanitize_html(html_code),
                 "styles.css": "",
                 "scripts.js": "",
             },
             "metadata": {
-                "name": "AI 生成原型",
-                "description": "基于 PRD 和项目上下文生成的可交互原型",
-                "page_count": 1,
-                "pages": [{"name": "index", "route": "/", "title": "原型首页"}],
+                "name": skeleton.get("product_name", "AI 生成原型"),
+                "description": f"基于 PRD 生成，包含 {report.get('pages', 0)} 个页面，{report.get('interactions', {}).get('total', 0)} 个交互点",
+                "page_count": report.get("pages", 1),
+                "pages": pages,
                 "generated_by": "ai",
+                "report": report,
+                "interaction_validation": interaction_report,
             }
         }
-    except Exception as e:
+    except Exception:
+        logging.exception("AI prototype generation failed")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_ERROR,
-            detail=f"AI 原型生成失败: {str(e)}"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="AI 原型生成失败，请稍后重试"
         )
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/prototype/ui-requirements", response_model=UIRequirementsResponse)
 async def extract_ui_requirements_endpoint(request: PRDRequest):
     """
@@ -245,15 +352,17 @@ async def extract_ui_requirements_endpoint(request: PRDRequest):
     try:
         result = extract_ui_requirements(request.prd_content)
         return result
-    except Exception as e:
+    except Exception:
+        logging.exception("UI requirements extraction failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"UI 需求提取失败: {str(e)}"
+            detail="UI 需求提取失败，请稍后重试"
         )
 
 
-@router.post("/api-spec", response_model=APISpecResponse)
-async def generate_api_spec(request: PRDRequest):
+@rate_limit(requests=20, window=60)
+@router.post("/api-spec")
+async def generate_api_spec(request: PRDRequest, http_request: Request):
     """
     从 PRD 生成 API 规范
 
@@ -270,13 +379,15 @@ async def generate_api_spec(request: PRDRequest):
     try:
         result = generate_api_from_prd(request.prd_content)
         return result
-    except Exception as e:
+    except Exception:
+        logging.exception("API spec generation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"API 规范生成失败: {str(e)}"
+            detail="API 规范生成失败，请稍后重试"
         )
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/api-spec/swagger-ui")
 async def generate_swagger_ui_endpoint(request: PRDRequest):
     """
@@ -294,15 +405,17 @@ async def generate_swagger_ui_endpoint(request: PRDRequest):
         result = generate_api_from_prd(request.prd_content)
         swagger_html = generate_swagger_ui(result["openapi"])
         return {"html": swagger_html}
-    except Exception as e:
+    except Exception:
+        logging.exception("Swagger UI generation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Swagger UI 生成失败: {str(e)}"
+            detail="Swagger UI 生成失败，请稍后重试"
         )
 
 
-@router.post("/components", response_model=ComponentsResponse)
-async def generate_components(request: PRDRequest):
+@rate_limit(requests=20, window=60)
+@router.post("/components")
+async def generate_components(request: PRDRequest, http_request: Request):
     """
     从 PRD 生成前端组件
 
@@ -319,13 +432,15 @@ async def generate_components(request: PRDRequest):
     try:
         result = generate_components_from_prd(request.prd_content)
         return result
-    except Exception as e:
+    except Exception:
+        logging.exception("Component generation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"组件生成失败: {str(e)}"
+            detail="组件生成失败，请稍后重试"
         )
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/components/suggestions", response_model=ComponentSuggestionsResponse)
 async def get_component_suggestions_endpoint(request: PRDRequest):
     """
@@ -342,15 +457,17 @@ async def get_component_suggestions_endpoint(request: PRDRequest):
     try:
         suggestions = get_component_suggestions(request.prd_content)
         return {"suggestions": suggestions}
-    except Exception as e:
+    except Exception:
+        logging.exception("Component suggestions failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"组件建议获取失败: {str(e)}"
+            detail="组件建议获取失败，请稍后重试"
         )
 
 
+@rate_limit(requests=5, window=60)
 @router.post("/generate-all")
-async def generate_all(request: PRDRequest):
+async def generate_all(request: PRDRequest, http_request: Request):
     """
     从 PRD 生成所有代码
 
@@ -363,14 +480,13 @@ async def generate_all(request: PRDRequest):
         )
 
     try:
-        # 生成原型
-        prototype = generate_prototype_from_prd(request.prd_content)
-
-        # 生成 API 规范
-        api_spec = generate_api_from_prd(request.prd_content)
-
-        # 生成组件
-        components = generate_components_from_prd(request.prd_content)
+        # 并行生成，避免同步调用阻塞事件循环
+        loop = asyncio.get_running_loop()
+        prototype, api_spec, components = await asyncio.gather(
+            loop.run_in_executor(None, generate_prototype_from_prd, request.prd_content),
+            loop.run_in_executor(None, generate_api_from_prd, request.prd_content),
+            loop.run_in_executor(None, generate_components_from_prd, request.prd_content),
+        )
 
         return {
             "prototype": prototype,
@@ -383,13 +499,15 @@ async def generate_all(request: PRDRequest):
                 "components": components["metadata"]["total_count"],
             }
         }
-    except Exception as e:
+    except Exception:
+        logging.exception("Code generation failed")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"代码生成失败: {str(e)}"
+            detail="代码生成失败，请稍后重试"
         )
 
 
+@rate_limit(requests=10, window=60)
 @router.post("/export")
 async def export_code(request: ExportRequest):
     """
@@ -413,6 +531,7 @@ async def export_code(request: ExportRequest):
     }
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/preview")
 async def preview_prototype(request: PreviewRequest):
     """

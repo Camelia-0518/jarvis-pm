@@ -37,7 +37,7 @@ async def test_create_persona_project_not_found(async_client: AsyncClient):
     """POST should return error for non-existent project."""
     payload = {"name": "Test", "role": "User"}
     response = await async_client.post("/api/v1/projects/non-existent/personas", json=payload)
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -73,7 +73,7 @@ async def test_list_personas_with_data(async_client: AsyncClient, sample_persona
 async def test_list_personas_wrong_project(async_client: AsyncClient, sample_persona: Persona):
     """GET should return error for project not owned."""
     response = await async_client.get("/api/v1/projects/non-existent/personas")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code in (400, 404)  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -97,7 +97,7 @@ async def test_get_persona_success(async_client: AsyncClient, sample_persona: Pe
 async def test_get_persona_not_found(async_client: AsyncClient):
     """GET should return error for non-existent persona."""
     response = await async_client.get("/api/v1/personas/non-existent-id")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -124,7 +124,7 @@ async def test_update_persona_not_found(async_client: AsyncClient):
     """PUT should return error for non-existent persona."""
     payload = {"name": "Updated"}
     response = await async_client.put("/api/v1/personas/non-existent-id", json=payload)
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -143,14 +143,16 @@ async def test_delete_persona_success(async_client: AsyncClient, sample_persona:
     assert data["success"] is True
 
     result = await db_session.execute(select(Persona).where(Persona.id == sample_persona.id))
-    assert result.scalar_one_or_none() is None
+    found = result.scalar_one_or_none()
+    assert found is not None
+    assert found.deleted_at is not None
 
 
 @pytest.mark.integration
 async def test_delete_persona_not_found(async_client: AsyncClient):
     """DELETE should return error for non-existent persona."""
     response = await async_client.delete("/api/v1/personas/non-existent-id")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False

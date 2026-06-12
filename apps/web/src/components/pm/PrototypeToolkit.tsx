@@ -222,7 +222,7 @@ export default function PrototypeToolkit() {
         ].map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
+            onClick={() => setActiveTab(tab.id as "pages" | "interactions" | "mobile")}
             className={`flex items-center gap-1 px-4 py-2 text-sm font-medium ${
               activeTab === tab.id
                 ? "border-b-2 border-sky-500 text-sky-600"

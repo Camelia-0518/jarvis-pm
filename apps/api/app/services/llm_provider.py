@@ -3,10 +3,13 @@
 支持Kimi、OpenAI、Anthropic等多种LLM服务
 """
 
+import logging
 from abc import ABC, abstractmethod
-from typing import Dict, Any, AsyncGenerator, Optional
+from typing import AsyncGenerator
 import os
 import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class LLMProvider(ABC):
@@ -76,8 +79,8 @@ class KimiProvider(LLMProvider):
                             delta = chunk["choices"][0].get("delta", {})
                             if "content" in delta:
                                 yield delta["content"]
-                        except:
-                            pass
+                        except Exception:
+                            logger.debug("Skipping unparseable SSE line: %s", data[:100])
 
 
 class OpenAIProvider(LLMProvider):
@@ -131,8 +134,8 @@ class OpenAIProvider(LLMProvider):
                             delta = chunk["choices"][0].get("delta", {})
                             if "content" in delta:
                                 yield delta["content"]
-                        except:
-                            pass
+                        except Exception:
+                            logger.debug("Skipping unparseable SSE line: %s", data[:100])
 
 
 class AnthropicProvider(LLMProvider):
@@ -199,8 +202,64 @@ class AnthropicProvider(LLMProvider):
                                 delta = event.get("delta", {})
                                 if "text" in delta:
                                     yield delta["text"]
-                        except:
-                            pass
+                        except Exception:
+                            logger.debug("Skipping unparseable SSE line: %s", data[:100])
+
+
+class DeepSeekProvider(LLMProvider):
+    """DeepSeek API Provider (OpenAI-compatible)"""
+
+    def __init__(self, api_key: str = None, model: str = None):
+        from app.core.config import settings
+        self.api_key = api_key or settings.DEEPSEEK_API_KEY
+        self.model = model or settings.DEEPSEEK_MODEL
+        self.base_url = settings.DEEPSEEK_BASE_URL.rstrip('/')
+
+    async def complete(self, prompt: str, temperature: float = 0.7, max_tokens: int = 4000) -> str:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": temperature,
+                    "max_tokens": max_tokens
+                },
+                timeout=180.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data["choices"][0]["message"]["content"]
+
+    async def stream(self, prompt: str, **kwargs) -> AsyncGenerator[str, None]:
+        async with httpx.AsyncClient() as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": True,
+                    **kwargs
+                },
+                timeout=180.0
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        data = line[6:]
+                        if data == "[DONE]":
+                            break
+                        import json
+                        try:
+                            chunk = json.loads(data)
+                            delta = chunk["choices"][0].get("delta", {})
+                            if "content" in delta:
+                                yield delta["content"]
+                        except Exception:
+                            logger.debug("Skipping unparseable SSE line: %s", data[:100])
 
 
 class LLMProviderFactory:
@@ -210,7 +269,8 @@ class LLMProviderFactory:
         "kimi": KimiProvider,
         "openai": OpenAIProvider,
         "anthropic": AnthropicProvider,
-        "claude": AnthropicProvider,  # alias for Anthropic-compatible API (e.g., Kimi For Coding)
+        "claude": AnthropicProvider,
+        "deepseek": DeepSeekProvider,
     }
 
     @classmethod

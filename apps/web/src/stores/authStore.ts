@@ -10,13 +10,11 @@ const DEFAULT_USER: User = {
 };
 
 interface AuthState {
-  // State
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   error: string | null;
 
-  // Actions (kept for compatibility, but no-op in single-user mode)
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => void;
@@ -25,34 +23,58 @@ interface AuthState {
 }
 
 export const useAuthStore = create<AuthState>()((set, get) => ({
-  user: DEFAULT_USER,
-  isAuthenticated: true,
-  isLoading: false,
+  user: null,
+  isAuthenticated: false,
+  isLoading: true,
   error: null,
 
-  login: async () => {
-    // Single-user mode: no login required
-    set({ user: DEFAULT_USER, isAuthenticated: true, error: null });
+  login: async (email: string, password: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      await authApi.login(email, password);
+      const user = await authApi.getCurrentUser();
+      set({ user, isAuthenticated: true, isLoading: false });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '登录失败';
+      // Fallback: if backend in single-user mode, auto-login
+      try {
+        const user = await authApi.getCurrentUser();
+        if (user && user.id) {
+          set({ user, isAuthenticated: true, isLoading: false, error: null });
+          return;
+        }
+      } catch { /* fall through */ }
+      set({ isLoading: false, error: msg });
+      throw e;
+    }
   },
 
-  register: async () => {
-    // Single-user mode: no registration required
-    set({ user: DEFAULT_USER, isAuthenticated: true, error: null });
+  register: async (email: string, password: string, name: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      await authApi.register(email, password, name);
+      const user = await authApi.getCurrentUser();
+      set({ user, isAuthenticated: true, isLoading: false });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : '注册失败';
+      set({ isLoading: false, error: msg });
+      throw e;
+    }
   },
 
   logout: () => {
-    // Single-user mode: keep default user
-    set({ user: DEFAULT_USER, isAuthenticated: true, error: null });
+    authApi.logout();
+    set({ user: null, isAuthenticated: false, error: null });
   },
 
   fetchUser: async () => {
-    if (!get().isAuthenticated) return;
     set({ isLoading: true });
     try {
       const user = await authApi.getCurrentUser();
-      set({ user, isLoading: false });
+      set({ user, isAuthenticated: true, isLoading: false });
     } catch {
-      set({ user: DEFAULT_USER, isLoading: false });
+      // Fallback to single-user mode
+      set({ user: DEFAULT_USER, isAuthenticated: true, isLoading: false });
     }
   },
 

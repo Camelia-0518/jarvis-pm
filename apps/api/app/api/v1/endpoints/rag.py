@@ -2,11 +2,13 @@
 
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.responses import ResponseBuilder
+from app.core.exceptions import AppException
 
 router = APIRouter()
 
@@ -52,7 +54,7 @@ class SearchResultItem(BaseModel):
     doc_id: str
     content: str
     score: float
-    metadata: dict
+    metadata: Dict[str, Any]
 
 
 class SearchResponse(BaseModel):
@@ -60,6 +62,7 @@ class SearchResponse(BaseModel):
     results: List[SearchResultItem]
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/search", response_model=SearchResponse)
 async def search_documents(request: SearchRequest):
     """在 Obsidian 知识库中检索相关文档"""
@@ -81,6 +84,7 @@ async def search_documents(request: SearchRequest):
         raise HTTPException(status_code=500, detail=f"检索失败: {str(e)}")
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/query", response_model=SearchResponse)
 async def query_documents(request: SearchRequest):
     """在 Obsidian 知识库中检索相关文档（/search 的别名）"""
@@ -101,7 +105,7 @@ class MemorySearchResultItem(BaseModel):
     source_id: str
     content: str
     score: float
-    metadata: dict
+    metadata: Dict[str, Any]
 
 
 class MemorySearchResponse(BaseModel):
@@ -109,6 +113,7 @@ class MemorySearchResponse(BaseModel):
     results: List[MemorySearchResultItem]
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/memory-search", response_model=MemorySearchResponse)
 async def memory_search(
     request: MemorySearchRequest,
@@ -141,6 +146,7 @@ async def memory_search(
         raise HTTPException(status_code=500, detail=f"语义检索失败: {str(e)}")
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/memory-search/query", response_model=MemorySearchResponse)
 async def memory_search_query(
     request: MemorySearchRequest,
@@ -150,17 +156,18 @@ async def memory_search_query(
     return await memory_search(request, db)
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/memory-index/{source_type}/{source_id}", response_model=dict)
 async def index_memory_document(
     source_type: str,
     source_id: str,
-    data: dict,
+    data: Dict[str, Any],
     db: AsyncSession = Depends(get_db)
 ):
     """手动索引文档到语义记忆"""
     content = data.get("content", "")
     if not content:
-        return ResponseBuilder.error(code="INVALID", message="content is required")
+        raise AppException("content is required", code="INVALID", status_code=400)
 
     try:
         from app.services.memory_indexer import memory_indexer
@@ -180,6 +187,7 @@ async def index_memory_document(
         raise HTTPException(status_code=500, detail=f"索引失败: {str(e)}")
 
 
+@rate_limit(requests=20, window=60)
 @router.delete("/memory-index/{source_type}/{source_id}", response_model=dict)
 async def delete_memory_index(
     source_type: str,

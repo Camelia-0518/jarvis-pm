@@ -7,6 +7,7 @@ import { GlobalSearch } from "@/components/global/GlobalSearch";
 import MobileBottomNav from "@/components/global/MobileBottomNav";
 import { Toaster } from "sonner";
 import ConfirmDialogProvider from "@/components/ui/ConfirmDialog";
+import { WorkspaceInitializer } from "@/components/global/WorkspaceInitializer";
 
 const inter = Inter({
   variable: "--font-inter",
@@ -33,6 +34,7 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col">
         <ConfirmDialogProvider>
+          <WorkspaceInitializer />
           <SkillInitializer />
           <main className="flex-1 pb-16 md:pb-0">{children}</main>
           <MobileBottomNav />

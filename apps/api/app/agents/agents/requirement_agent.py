@@ -10,11 +10,10 @@ import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from datetime import datetime
 
 from ..base import BaseAgent, AgentResult, AgentState
-from ..llm_client import create_default_client
 
 
 class RequirementAgent(BaseAgent):
@@ -49,14 +48,7 @@ class RequirementAgent(BaseAgent):
 
 重要：所有输出必须使用中文。"""
 
-    def __init__(self, llm_client=None, **kwargs):
-        """初始化需求分析 Agent"""
-        super().__init__(
-            llm_client=llm_client or create_default_client(),
-            **kwargs
-        )
-
-    async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
         """
         执行需求分析
 
@@ -70,81 +62,66 @@ class RequirementAgent(BaseAgent):
         Returns:
             AgentResult: 包含结构化分析结果
         """
-        start_time = datetime.now()
-        self._set_state(AgentState.RUNNING)
+        # 步骤1: 解析输入
+        step1 = self._create_step("parse_input", "解析输入")
+        raw_requirements = input_data.get("raw_requirements", "")
+        product_name = input_data.get("product_name", "未命名产品")
+        industry = input_data.get("industry", "")
+        analysis_depth = input_data.get("analysis_depth", "standard")
+        self._complete_step(step1, f"产品: {product_name}, 深度: {analysis_depth}")
 
-        try:
-            # 步骤1: 解析输入
-            step1 = self._create_step("parse_input", "解析输入")
-            raw_requirements = input_data.get("raw_requirements", "")
-            product_name = input_data.get("product_name", "未命名产品")
-            industry = input_data.get("industry", "")
-            analysis_depth = input_data.get("analysis_depth", "standard")
-            self._complete_step(step1, f"产品: {product_name}, 深度: {analysis_depth}")
+        # 步骤2: 用户分析
+        step2 = self._create_step("user_analysis", "目标用户分析")
+        user_analysis = await self._analyze_users(raw_requirements, industry)
+        self._complete_step(step2, f"识别用户群体: {len(user_analysis.get('user_groups', []))}")
 
-            # 步骤2: 用户分析
-            step2 = self._create_step("user_analysis", "目标用户分析")
-            user_analysis = await self._analyze_users(raw_requirements, industry)
-            self._complete_step(step2, f"识别用户群体: {len(user_analysis.get('user_groups', []))}")
+        # 步骤3: 痛点分析
+        step3 = self._create_step("pain_point_analysis", "痛点分析")
+        pain_points = await self._analyze_pain_points(raw_requirements)
+        self._complete_step(step3, f"识别痛点: {len(pain_points.get('pain_points', []))}")
 
-            # 步骤3: 痛点分析
-            step3 = self._create_step("pain_point_analysis", "痛点分析")
-            pain_points = await self._analyze_pain_points(raw_requirements)
-            self._complete_step(step3, f"识别痛点: {len(pain_points.get('pain_points', []))}")
+        # 步骤4: 功能需求提取
+        step4 = self._create_step("feature_extraction", "功能需求提取")
+        features = await self._extract_features(raw_requirements, analysis_depth)
+        self._complete_step(step4, f"提取功能: {len(features.get('features', []))}")
 
-            # 步骤4: 功能需求提取
-            step4 = self._create_step("feature_extraction", "功能需求提取")
-            features = await self._extract_features(raw_requirements, analysis_depth)
-            self._complete_step(step4, f"提取功能: {len(features.get('features', []))}")
+        # 步骤5: 用户故事生成
+        step5 = self._create_step("user_stories", "用户故事生成")
+        user_stories = await self._generate_user_stories(features, user_analysis)
+        self._complete_step(step5, f"生成故事: {len(user_stories)}")
 
-            # 步骤5: 用户故事生成
-            step5 = self._create_step("user_stories", "用户故事生成")
-            user_stories = await self._generate_user_stories(features, user_analysis)
-            self._complete_step(step5, f"生成故事: {len(user_stories)}")
+        # 步骤6: 优先级排序
+        step6 = self._create_step("prioritization", "优先级排序")
+        prioritized = await self._prioritize_features(features, pain_points)
+        self._complete_step(step6, "排序完成")
 
-            # 步骤6: 优先级排序
-            step6 = self._create_step("prioritization", "优先级排序")
-            prioritized = await self._prioritize_features(features, pain_points)
-            self._complete_step(step6, "排序完成")
+        # 组装结果
+        result_data = {
+            "product_name": product_name,
+            "industry": industry,
+            "analysis_depth": analysis_depth,
+            "user_analysis": user_analysis,
+            "pain_points": pain_points,
+            "features": features,
+            "user_stories": user_stories,
+            "prioritized_features": prioritized
+        }
 
-            # 组装结果
-            execution_time = (datetime.now() - start_time).total_seconds()
+        # 生成 Markdown 报告
+        report = self._generate_report(result_data)
 
-            result_data = {
-                "product_name": product_name,
-                "industry": industry,
-                "analysis_depth": analysis_depth,
-                "user_analysis": user_analysis,
-                "pain_points": pain_points,
-                "features": features,
-                "user_stories": user_stories,
-                "prioritized_features": prioritized
+
+        return AgentResult(
+            success=True,
+            output=report,
+            data=result_data,
+            execution_time=self.elapsed_seconds,
+            metadata={
+                "agent_name": self.name,
+                "version": self.version,
+                "steps_completed": len(self.steps)
             }
-
-            # 生成 Markdown 报告
-            report = self._generate_report(result_data)
-
-            self._set_state(AgentState.COMPLETED)
-
-            return AgentResult(
-                success=True,
-                output=report,
-                data=result_data,
-                execution_time=execution_time,
-                metadata={
-                    "agent_name": self.name,
-                    "version": self.version,
-                    "steps_completed": len(self.steps)
-                }
-            )
-
-        except Exception as e:
-            self._set_state(AgentState.FAILED)
-            return AgentResult(
-                success=False,
-                error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
-            )
+        )
 
     async def _analyze_users(
         self,

@@ -404,7 +404,7 @@ export default function CommunicationPlaybook() {
                   key={i}
                   className="rounded bg-slate-50 p-3 text-sm text-slate-700 dark:bg-slate-700/50 dark:text-slate-300"
                 >
-                  "{script}"
+                  {"“"}{script}{"”"}
                 </div>
               ))}
             </div>

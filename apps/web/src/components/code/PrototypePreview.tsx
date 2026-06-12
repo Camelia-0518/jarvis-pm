@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
+import { request } from "@/lib/api";
 import {
   Monitor,
   Smartphone,
@@ -66,19 +67,13 @@ const DEVICE_DIMENSIONS: Record<DeviceType, { width: number; height: number; lab
   mobile: { width: 375, height: 812, label: '手机' },
 };
 
-// API client
+// API client — routed through central request() for timeout/retry/auth consistency
 const generatePrototype = async (prdContent: string): Promise<PrototypeData> => {
-  const response = await fetch('/api/v1/code/prototype', {
+  return request<PrototypeData>('/code/prototype', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prd_content: prdContent }),
+    timeoutMs: 120000,
   });
-
-  if (!response.ok) {
-    throw new Error('Failed to generate prototype');
-  }
-
-  return response.json();
 };
 
 // Components
@@ -424,7 +419,7 @@ export const PrototypePreview: React.FC<PrototypePreviewProps> = ({
     if (prdContent && !prototypeData) {
       handleGenerate();
     }
-  }, []);
+  }, [prdContent, prototypeData, handleGenerate]);
 
   return (
     <div className={cn('flex flex-col h-full bg-white rounded-lg border border-gray-200 overflow-hidden', className)}>

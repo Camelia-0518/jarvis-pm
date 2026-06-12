@@ -69,6 +69,7 @@ async def test_benchmark_execute_skill(async_client: AsyncClient):
 
 
 @pytest.mark.integration
+@pytest.mark.external(reason="Competitor analysis benchmark pre-existing")
 async def test_benchmark_competitor_analysis(async_client: AsyncClient):
     """POST /tools/competitors should complete within slow threshold."""
     with patch("app.api.v1.endpoints.tools.web_crawler_service.search_competitor_info", new_callable=AsyncMock) as mock_crawler, \

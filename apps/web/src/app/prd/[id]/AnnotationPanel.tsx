@@ -242,7 +242,7 @@ export default function AnnotationPanel({
                   </div>
                   {a.selected_text && (
                     <div className="mb-1 rounded bg-white/80 px-1.5 py-0.5 text-[10px] text-slate-500 italic dark:bg-slate-800/80 dark:text-slate-400">
-                      "{a.selected_text.length > 50 ? a.selected_text.slice(0, 50) + '...' : a.selected_text}"
+                      {"“"}{a.selected_text.length > 50 ? a.selected_text.slice(0, 50) + '...' : a.selected_text}{"”"}
                     </div>
                   )}
                   <p className="mb-1.5 text-slate-700 dark:text-slate-300">{a.content}</p>

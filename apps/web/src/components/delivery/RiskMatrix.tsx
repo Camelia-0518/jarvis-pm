@@ -1,5 +1,6 @@
 "use client";
 
+import { useMemo } from "react";
 import { type RiskItem } from "@/lib/api";
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -10,43 +11,124 @@ const LEVEL_COLORS: Record<string, string> = {
 };
 
 const CELL_BG: Record<string, string> = {
-  "低(0-0.3)/低(0-0.3)": "bg-green-50 dark:bg-green-950/30",
-  "低(0-0.3)/中(0.3-0.5)": "bg-yellow-50 dark:bg-yellow-950/30",
-  "低(0-0.3)/高(0.5-1.0)": "bg-orange-50 dark:bg-orange-950/30",
-  "中(0.3-0.5)/低(0-0.3)": "bg-yellow-50 dark:bg-yellow-950/30",
-  "中(0.3-0.5)/中(0.3-0.5)": "bg-orange-50 dark:bg-orange-950/30",
-  "中(0.3-0.5)/高(0.5-1.0)": "bg-red-50 dark:bg-red-950/30",
-  "高(0.5-1.0)/低(0-0.3)": "bg-orange-50 dark:bg-orange-950/30",
-  "高(0.5-1.0)/中(0.3-0.5)": "bg-red-50 dark:bg-red-950/30",
-  "高(0.5-1.0)/高(0.5-1.0)": "bg-red-100 dark:bg-red-950/50",
+  "低/低": "bg-green-50 dark:bg-green-950/30",
+  "低/中": "bg-yellow-50 dark:bg-yellow-950/30",
+  "低/高": "bg-orange-50 dark:bg-orange-950/30",
+  "中/低": "bg-yellow-50 dark:bg-yellow-950/30",
+  "中/中": "bg-orange-50 dark:bg-orange-950/30",
+  "中/高": "bg-red-50 dark:bg-red-950/30",
+  "高/低": "bg-orange-50 dark:bg-orange-950/30",
+  "高/中": "bg-red-50 dark:bg-red-950/30",
+  "高/高": "bg-red-100 dark:bg-red-950/50",
 };
+
+const LEVEL_ORDER = ["低", "中", "高"] as const;
+const ALL_LEVELS = ["极高", "高", "中", "低"] as const;
+
+function normalizeLabel(v: unknown): string {
+  if (typeof v === "number") {
+    if (v <= 0.3) return "低";
+    if (v <= 0.5) return "中";
+    return "高";
+  }
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (t === "极高" || t === "高" || t === "中" || t === "低") return t;
+    const n = parseFloat(t);
+    if (!isNaN(n)) {
+      if (n <= 0.3) return "低";
+      if (n <= 0.5) return "中";
+      return "高";
+    }
+  }
+  return "中";
+}
 
 interface Props {
   risks: RiskItem[];
-  matrix: {
-    grid: Record<string, { count: number; risks: string[] }>;
-    summary: Record<string, number>;
-  };
+  matrix?: {
+    grid?: Record<string, { count: number; risks: string[] }>;
+    summary?: Record<string, number>;
+  } | null;
 }
 
 export default function RiskMatrix({ risks, matrix }: Props) {
-  const probLabels = ["低(0-0.3)", "中(0.3-0.5)", "高(0.5-1.0)"];
-  const impactLabels = ["低(0-0.3)", "中(0.3-0.5)", "高(0.5-1.0)"];
+  // Normalize risks: fill missing ids, normalize prob/impact/level
+  const normalized = useMemo(() => {
+    const safeRisks = risks || [];
+    return safeRisks.map((r, i) => {
+      const prob = normalizeLabel(r.probability);
+      const impact = normalizeLabel(r.impact);
+      const level = r.risk_level || (
+        prob === "高" && impact === "高" ? "极高" :
+        (prob === "高" || impact === "高") ? "高" :
+        (prob === "中" || impact === "中") ? "中" : "低"
+      );
+      return {
+        ...r,
+        id: r.id || `risk-${i}`,
+        probability: prob,
+        impact,
+        risk_level: level,
+      };
+    });
+  }, [risks]);
 
-  const riskMap: Record<string, RiskItem> = {};
-  risks.forEach((r) => {
-    riskMap[r.id] = r;
-  });
+  // Build summary from real data
+  const summary = useMemo(() => {
+    const s: Record<string, number> = { "极高": 0, "高": 0, "中": 0, "低": 0 };
+    normalized.forEach((r) => {
+      if (s[r.risk_level] !== undefined) s[r.risk_level]++;
+    });
+    return s;
+  }, [normalized]);
+
+  // Build grid from real data
+  const grid = useMemo(() => {
+    const g: Record<string, { count: number; risks: string[] }> = {};
+    for (const pl of LEVEL_ORDER) {
+      for (const il of LEVEL_ORDER) {
+        g[`${pl}/${il}`] = { count: 0, risks: [] };
+      }
+    }
+    normalized.forEach((r) => {
+      const key = `${r.probability}/${r.impact}`;
+      if (g[key]) {
+        g[key].count++;
+        g[key].risks.push(r.id);
+      }
+    });
+    return g;
+  }, [normalized]);
+
+  // Risk lookup by id
+  const riskMap = useMemo(() => {
+    const m: Record<string, typeof normalized[number]> = {};
+    normalized.forEach((r) => { m[r.id] = r; });
+    return m;
+  }, [normalized]);
+
+  // Use backend matrix if it has richer data, otherwise use computed
+  const displaySummary = matrix?.summary && Object.values(matrix.summary).some((v) => v > 0)
+    ? matrix.summary
+    : summary;
+  const displayGrid = matrix?.grid && Object.keys(matrix.grid).length > 0
+    ? matrix.grid
+    : grid;
+
+  if (normalized.length === 0) {
+    return <p className="text-sm text-slate-500 py-8 text-center">暂无风险数据</p>;
+  }
 
   return (
     <div className="space-y-6">
       {/* Summary */}
       <div className="flex gap-4 flex-wrap">
-        {(["极高", "高", "中", "低"] as const).map((level) => (
+        {ALL_LEVELS.map((level) => (
           <div key={level} className="flex items-center gap-2">
             <span className={`inline-block w-3 h-3 rounded ${LEVEL_COLORS[level].split(" ")[0]}`} />
             <span className="text-sm text-slate-600 dark:text-slate-400">
-              {level}风险：<strong>{matrix.summary[level] ?? 0}</strong>
+              {level}风险：<strong>{displaySummary[level] ?? 0}</strong>
             </span>
           </div>
         ))}
@@ -58,36 +140,37 @@ export default function RiskMatrix({ risks, matrix }: Props) {
           <thead>
             <tr>
               <th className="p-2 text-slate-500 font-medium w-24">概率 →<br />影响 ↓</th>
-              {probLabels.map((pl) => (
-                <th key={pl} className="p-2 text-slate-500 font-medium w-28">{pl}</th>
+              {LEVEL_ORDER.map((pl) => (
+                <th key={pl} className="p-2 text-slate-500 font-medium w-28">低/中/高</th>
               ))}
             </tr>
           </thead>
           <tbody>
-            {impactLabels.map((il) => (
+            {LEVEL_ORDER.map((il) => (
               <tr key={il}>
                 <td className="p-2 text-slate-500 font-medium border border-slate-200 dark:border-slate-700">{il}</td>
-                {probLabels.map((pl) => {
+                {LEVEL_ORDER.map((pl) => {
                   const key = `${pl}/${il}`;
-                  const cell = matrix.grid[key];
+                  const cell = displayGrid[key];
+                  const count = cell?.count ?? 0;
                   const bg = CELL_BG[key] || "";
                   return (
                     <td key={key} className={`p-2 border border-slate-200 dark:border-slate-700 text-center ${bg}`}>
                       <div className="text-lg font-bold text-slate-700 dark:text-slate-300">
-                        {cell?.count ?? 0}
+                        {count}
                       </div>
-                      {cell && cell.count > 0 && (
+                      {count > 0 && cell && (
                         <div className="mt-1 space-y-0.5">
                           {cell.risks.slice(0, 3).map((rid) => {
                             const r = riskMap[rid];
                             return r ? (
                               <div key={rid} className="text-[10px] text-slate-500 truncate" title={r.risk}>
-                                {r.risk.slice(0, 18)}{r.risk.length > 18 ? "..." : ""}
+                                {(r.risk || "").slice(0, 18)}{(r.risk || "").length > 18 ? "..." : ""}
                               </div>
                             ) : null;
                           })}
-                          {cell.count > 3 && (
-                            <div className="text-[10px] text-slate-400">+{cell.count - 3} 个</div>
+                          {count > 3 && (
+                            <div className="text-[10px] text-slate-400">+{count - 3} 个</div>
                           )}
                         </div>
                       )}
@@ -103,32 +186,42 @@ export default function RiskMatrix({ risks, matrix }: Props) {
       {/* Risk list */}
       <div className="space-y-2">
         <h4 className="text-sm font-semibold text-slate-700 dark:text-slate-300">风险清单</h4>
-        {risks.slice(0, 10).map((r) => (
+        {normalized.slice(0, 10).map((r) => (
           <div
             key={r.id}
-            className={`rounded-lg border p-3 ${LEVEL_COLORS[r.risk_level] || ""}`}
+            className={`rounded-lg border p-3 ${LEVEL_COLORS[r.risk_level] || LEVEL_COLORS["中"]}`}
           >
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1 min-w-0">
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-xs font-mono text-slate-500">{r.id}</span>
-                  <span className="text-xs font-medium text-slate-500">{r.category}</span>
+                  {r.category && <span className="text-xs font-medium text-slate-500">{r.category}</span>}
                   <span className="text-xs font-bold">{r.risk_level}</span>
                 </div>
                 <p className="text-sm font-medium text-slate-800 dark:text-slate-200">{r.risk}</p>
-                <p className="text-xs text-slate-500 mt-1">
-                  预防：{r.prevention?.slice(0, 80)}{(r.prevention?.length ?? 0) > 80 ? "..." : ""}
-                </p>
+                {r.prevention && (
+                  <p className="text-xs text-slate-500 mt-1">
+                    预防：{r.prevention.slice(0, 80)}{r.prevention.length > 80 ? "..." : ""}
+                  </p>
+                )}
+                {r.contingency && (
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    应急：{r.contingency.slice(0, 80)}{r.contingency.length > 80 ? "..." : ""}
+                  </p>
+                )}
                 <div className="flex items-center gap-3 mt-1 text-xs text-slate-400">
                   <span>P={r.probability}</span>
                   <span>I={r.impact}</span>
-                  <span>S={r.risk_score}</span>
-                  <span>负责人：{r.owner}</span>
+                  {r.risk_score && <span>S={r.risk_score}</span>}
+                  {r.owner && <span>负责人：{r.owner}</span>}
                 </div>
               </div>
             </div>
           </div>
         ))}
+        {normalized.length > 10 && (
+          <p className="text-xs text-slate-400 text-center">还有 {normalized.length - 10} 条风险</p>
+        )}
       </div>
     </div>
   );

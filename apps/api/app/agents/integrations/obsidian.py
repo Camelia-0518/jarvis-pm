@@ -11,7 +11,7 @@ import logging
 
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-import json
+
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional

@@ -9,7 +9,7 @@ Agent API 路由
 import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-from typing import List, Optional, Any
+from typing import List, Optional, Dict, Any
 from uuid import UUID
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from pydantic import BaseModel, Field
@@ -18,7 +18,7 @@ from app.agents import (
     AgentRegistry, AgentManager, auto_register_agents,
     TaskQueue, get_task_queue, TaskPriority
 )
-from app.agents.agents import PRDAgent, RequirementAgent
+
 from app.core.responses import ResponseBuilder
 from app.core.rate_limit import rate_limit
 
@@ -47,6 +47,7 @@ class PRDRequest(BaseModel):
     key_features: List[str] = Field(..., min_length=1)
     constraints: Optional[List[str]] = []
     sections: Optional[List[str]] = None
+    skip_evaluation: bool = True  # 默认跳过 AI 评估，加快速度
 
 
 class RequirementRequest(BaseModel):
@@ -69,22 +70,11 @@ class TaskResult(BaseModel):
     error: Optional[str] = None
 
 
-# ============== 启动/关闭事件 ==============
-
-@router.on_event("startup")
-async def startup():
-    queue = get_task_queue(max_workers=2)
-    await queue.start()
-
-
-@router.on_event("shutdown")
-async def shutdown():
-    queue = get_task_queue()
-    await queue.stop()
 
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("", response_model=dict)
 async def list_agents():
     """列出所有可用的 Agent"""
@@ -102,6 +92,7 @@ async def list_agents():
     ])
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/stats", response_model=dict)
 async def get_stats():
     """获取系统统计信息"""
@@ -112,8 +103,8 @@ async def get_stats():
     })
 
 
-@router.post("/prd/generate", response_model=dict)
 @rate_limit(requests=10, window=60)  # 10 PRD generations per minute
+@router.post("/prd/generate")
 async def generate_prd(request: PRDRequest, background_tasks: BackgroundTasks):
     """
     提交 PRD 生成任务
@@ -128,7 +119,8 @@ async def generate_prd(request: PRDRequest, background_tasks: BackgroundTasks):
         "target_users": request.target_users,
         "key_features": request.key_features,
         "constraints": request.constraints or [],
-        "sections": request.sections or ["background", "user_stories", "functional_requirements"]
+        "sections": request.sections or ["background", "user_stories", "functional_requirements"],
+        "skip_evaluation": request.skip_evaluation,
     }
 
     task_id = await queue.submit(
@@ -144,8 +136,8 @@ async def generate_prd(request: PRDRequest, background_tasks: BackgroundTasks):
     })
 
 
-@router.post("/requirements/analyze", response_model=dict)
 @rate_limit(requests=10, window=60)  # 10 requirement analyses per minute
+@router.post("/requirements/analyze")
 async def analyze_requirements(request: RequirementRequest):
     """
     提交需求分析任务
@@ -174,6 +166,7 @@ async def analyze_requirements(request: RequirementRequest):
     })
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/tasks", response_model=dict)
 async def list_tasks(
     status: Optional[str] = Query(None, description="Filter by status"),
@@ -205,6 +198,7 @@ async def list_tasks(
     )
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/tasks/{task_id}", response_model=dict)
 async def get_task_status(task_id: str):
     """获取任务状态和结果"""
@@ -227,6 +221,41 @@ async def get_task_status(task_id: str):
     })
 
 
+@rate_limit(requests=100, window=60)
+@router.get("/tasks/{task_id}/progress", response_model=dict)
+async def get_task_progress(task_id: str):
+    """获取任务执行进度（支持实时轮询）"""
+    try:
+        task_uuid = UUID(task_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid task ID")
+
+    queue = get_task_queue()
+    task = await queue.get_task(task_uuid)
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # 从进度更新中提取最新信息
+    latest_progress = task.progress_updates[-1] if task.progress_updates else None
+    steps_info = []
+    if task.result and task.result.metadata:
+        steps_info = task.result.metadata.get("steps_completed", 0)
+
+    return ResponseBuilder.success({
+        "task_id": str(task.id),
+        "status": task.status,
+        "progress": {
+            "total_steps": 6,  # PRDAgent 的标准步骤数
+            "completed_steps": steps_info if isinstance(steps_info, int) else len(task.progress_updates),
+            "latest_update": latest_progress,
+            "updates": task.progress_updates,
+        },
+        "error": task.error
+    })
+
+
+@rate_limit(requests=100, window=60)
 @router.get("/{agent_name}", response_model=dict)
 async def get_agent_info(agent_name: str):
     """获取 Agent 详细信息"""

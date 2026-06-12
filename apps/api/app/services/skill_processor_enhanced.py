@@ -8,17 +8,20 @@
 5. 详细日志
 """
 
+import asyncio
 import json
 import logging
 import re
 import time
+import traceback
 from typing import Dict, Any, List, Optional
-from datetime import datetime
+
 
 logger = logging.getLogger(__name__)
 
-from app.core.config import settings
+
 from app.core.cache import cache_manager
+from app.core.skill_loader import load_skills_from_json
 from app.agents.llm_client import LLMClient, LLMClientFactory, create_default_client
 from app.services.medical_terminology import (
     detect_medical_terms,
@@ -26,6 +29,7 @@ from app.services.medical_terminology import (
     add_medical_context,
 )
 from app.services.output_validator import OutputValidator
+from app.utils.json_helpers import extract_json_from_text, repair_truncated_json, parse_json_output
 
 # Lazy import to avoid circular dependencies at module load time
 _retrieval_engine = None
@@ -44,6 +48,18 @@ def _get_retrieval_engine():
 class SkillProcessorEnhanced:
     """增强版技能处理器"""
 
+    _instance: Optional["SkillProcessorEnhanced"] = None
+    _lock = asyncio.Lock()
+
+    @classmethod
+    async def get_instance(cls, llm_provider: str = None, enable_cache: bool = True) -> "SkillProcessorEnhanced":
+        """获取全局单例，避免高并发时重复创建实例。"""
+        if cls._instance is None:
+            async with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls(llm_provider=llm_provider, enable_cache=enable_cache)
+        return cls._instance
+
     def __init__(self, llm_provider: str = None, enable_cache: bool = True):
         self._skills: Dict[str, Dict[str, Any]] = {}
         # 统一使用 llm_client 体系的 FallbackLLMClient（支持真实 AI 自动降级）
@@ -55,7 +71,15 @@ class SkillProcessorEnhanced:
         self._init_skills()
 
     def _init_skills(self):
-        """初始化所有技能定义"""
+        """Initialize skill definitions from external JSON with built-in fallback."""
+        # Try loading from JSON files first (allows hot-reload without code change)
+        external_skills = load_skills_from_json()
+        if external_skills:
+            self._skills = external_skills
+            logger.info("Loaded %d skills from external JSON", len(external_skills))
+            return
+
+        # Fallback: built-in definitions (legacy, kept for backward compatibility)
         self._skills = {
             # ========== PM 技能 ==========
             "requirement-analysis": {
@@ -197,29 +221,41 @@ class SkillProcessorEnhanced:
 **模板类型**：{template}
 **详细程度**：{detailLevel}
 
-请根据需求分析结果撰写PRD，按以下 JSON 格式返回：
-{{
-  "title": "文档标题（简洁）",
-  "version": "1.0",
-  "sections": [
-    {{"title": "1. 文档信息", "content": "版本历史、作者...", "priority": "high"}},
-    {{"title": "2. 项目背景与目标", "content": "...", "priority": "high"}},
-    {{"title": "3. 用户画像", "content": "...", "priority": "high"}},
-    {{"title": "4. 功能需求", "content": "...", "priority": "high"}},
-    {{"title": "5. 非功能需求", "content": "...", "priority": "normal"}},
-    {{"title": "6. 数据埋点", "content": "...", "priority": "normal"}},
-    {{"title": "7. 里程碑", "content": "...", "priority": "normal"}},
-    {{"title": "8. 附录", "content": "...", "priority": "low"}}
-  ],
-  "markdown": "# 文档标题\n\n> 版本: 1.0\n\n## 1. 文档信息\n...\n\n## 2. 项目背景与目标\n...\n\n（每个章节写2-3段详细内容，总字数不少于500字）"
-}}
+请直接输出 Markdown 格式的 PRD 内容，格式如下：
 
-重要要求：
-1. 必须返回合法 JSON
-2. title 必须是完整的字符串，不要截断
-3. markdown 字段放完整的 PRD 正文（用 \n 换行）
-4. sections 的 content 也要充实详细，不要只写一句话
-5. 使用中文撰写""",
+# 产品名称
+
+> 版本: 1.0
+
+## 1. 文档信息
+...
+
+## 2. 项目背景与目标
+...
+
+## 3. 用户画像
+...
+
+## 4. 功能需求
+...
+
+## 5. 非功能需求
+...
+
+## 6. 数据埋点
+...
+
+## 7. 里程碑
+...
+
+## 8. 附录
+...
+
+要求：
+1. 每个章节写2-3段详细内容，总字数不少于500字
+2. 内容充实具体，不要只写一句话
+3. 使用中文撰写
+4. 直接输出 Markdown，不需要 JSON 包装""",
             },
 
             "tech-architecture": {
@@ -688,6 +724,15 @@ class SkillProcessorEnhanced:
             for skill in self._skills.values()
         ]
 
+    def reload_skills(self):
+        """Reload skill definitions from external JSON at runtime."""
+        external_skills = load_skills_from_json()
+        if external_skills:
+            self._skills = external_skills
+            logger.info("Reloaded %d skills from external JSON", len(external_skills))
+            return True
+        return False
+
     def get_skill(self, skill_id: str) -> Optional[Dict[str, Any]]:
         """获取技能详情"""
         skill = self._skills.get(skill_id)
@@ -715,6 +760,7 @@ class SkillProcessorEnhanced:
             prompt = template.format(**inputs)
         except KeyError as e:
             # 如果有缺失的变量，使用空字符串填充
+            inputs = dict(inputs)  # shallow copy to avoid mutating caller's dict
             missing_key = str(e).strip("'")
             inputs[missing_key] = ""
             prompt = template.format(**inputs)
@@ -775,101 +821,48 @@ class SkillProcessorEnhanced:
 
         return prompt
 
-    def _parse_json_output(self, text: str, skill_id: str = None) -> Dict[str, Any]:
-        """从LLM响应中提取JSON，支持截断修复"""
-        # 尝试提取代码块中的JSON
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', text)
-        if json_match:
-            json_str = json_match.group(1)
-        else:
-            # 尝试直接解析整个文本
-            json_str = text.strip()
-
+    def _is_empty_output(self, skill_id: str, output: Dict[str, Any]) -> bool:
+        """Check if the parsed output is effectively empty (model returned JSON skeleton)."""
+        empty_checks = {
+            "milestone-plan": lambda o: len(o.get("phases", [])) == 0,
+            "compliance-check": lambda o: len(o.get("criticalIssues", [])) == 0 and len(o.get("categories", [])) == 0,
+            "medical-review": lambda o: len(o.get("riskAssessment", [])) == 0 and not o.get("summary", "").strip(),
+            "requirement-analysis": lambda o: len(o.get("featureList", o.get("feature_list", {})).get("p0", [])) == 0,
+            "brainstorm": lambda o: len(o.get("ideas", [])) == 0,
+            "user-story": lambda o: len(o.get("stories", [])) == 0,
+        }
+        check = empty_checks.get(skill_id)
+        if check is None:
+            return False
         try:
-            parsed = json.loads(json_str)
-            # 对 write-prd，验证解析结果是否合理
-            if skill_id == "write-prd":
-                title = parsed.get("title", "")
-                if not title or len(title) < 3 or title in ("{", "[", ""):
-                    return {"raw_response": text}
-            return parsed
-        except json.JSONDecodeError:
-            # 尝试修复被截断的JSON
-            try:
-                fixed = self._repair_truncated_json(json_str)
-                parsed = json.loads(fixed)
-                # 修复后也要验证 write-prd 的 title
-                if skill_id == "write-prd":
-                    title = parsed.get("title", "")
-                    if not title or len(title) < 3 or title in ("{", "[", ""):
-                        return {"raw_response": text}
-                return parsed
-            except json.JSONDecodeError:
-                # 如果解析失败，返回文本内容
-                return {"raw_response": text}
+            return check(output)
+        except Exception:
+            return False
 
-    def _repair_truncated_json(self, raw: str) -> str:
-        """尝试修复被截断的JSON字符串"""
-        cleaned = raw.rstrip()
+    def _parse_json_output(self, text: str, skill_id: str = None) -> Dict[str, Any]:
+        """从LLM响应中提取结构化数据，支持截断修复"""
+        # write-prd 直接返回 markdown，无需 JSON 解析
+        if skill_id == "write-prd":
+            # 提取 markdown 代码块或全文
+            md_match = re.search(r'```markdown\s*([\s\S]*?)```', text)
+            if md_match:
+                markdown = md_match.group(1).strip()
+            else:
+                code_match = re.search(r'```(?:\w+)?\s*([\s\S]*?)```', text)
+                if code_match:
+                    markdown = code_match.group(1).strip()
+                else:
+                    markdown = text.strip()
+            title_match = re.search(r'^#\s+(.+)$', markdown, re.MULTILINE)
+            title = title_match.group(1).strip() if title_match else "PRD Document"
+            return {
+                "title": title,
+                "version": "1.0",
+                "sections": [],
+                "markdown": markdown
+            }
 
-        # 如果还在字符串中，找到最后一个完整的字符串闭合
-        last_safe_pos = -1
-        i = 0
-        in_string = False
-        escape_next = False
-        while i < len(cleaned):
-            ch = cleaned[i]
-            if escape_next:
-                escape_next = False
-                i += 1
-                continue
-            if ch == '\\':
-                escape_next = True
-                i += 1
-                continue
-            if ch == '"':
-                in_string = not in_string
-                if not in_string:
-                    last_safe_pos = i
-                i += 1
-                continue
-            i += 1
-
-        if in_string and last_safe_pos >= 0:
-            cleaned = cleaned[:last_safe_pos + 1]
-
-        # 去掉末尾的逗号
-        cleaned = cleaned.rstrip().rstrip(',')
-
-        # 补齐缺失的闭合括号/花括号（忽略字符串内部）
-        brace_depth = 0
-        bracket_depth = 0
-        in_str = False
-        escape = False
-        for ch in cleaned:
-            if escape:
-                escape = False
-                continue
-            if ch == '\\':
-                escape = True
-                continue
-            if ch == '"':
-                in_str = not in_str
-                continue
-            if not in_str:
-                if ch == '{':
-                    brace_depth += 1
-                elif ch == '}':
-                    brace_depth -= 1
-                elif ch == '[':
-                    bracket_depth += 1
-                elif ch == ']':
-                    bracket_depth -= 1
-
-        cleaned += ']' * max(0, bracket_depth)
-        cleaned += '}' * max(0, brace_depth)
-
-        return cleaned
+        return parse_json_output(text)
 
     def _format_output(self, skill: Dict[str, Any], output: Dict[str, Any]) -> str:
         """生成格式化的markdown输出"""
@@ -896,8 +889,8 @@ class SkillProcessorEnhanced:
                     lines.append("")
 
         elif skill['id'] == 'write-prd':
-            # LLM 直接返回 markdown，直接使用
-            return output.get('markdown', output.get('raw_response', 'N/A'))
+            # LLM 直接返回 markdown
+            return output.get('markdown', 'N/A')
 
         elif skill['id'] == 'tech-architecture':
             lines.append(f"### 技术栈\n{output.get('techStack', 'N/A')}\n")
@@ -943,7 +936,7 @@ class SkillProcessorEnhanced:
         """生成缓存key"""
         import hashlib
         key_data = f"{skill_id}:{json.dumps(inputs, sort_keys=True)}"
-        return f"skill:{hashlib.md5(key_data.encode()).hexdigest()}"
+        return f"skill:{hashlib.sha256(key_data.encode()).hexdigest()}"
 
     async def execute_skill(
         self,
@@ -974,6 +967,7 @@ class SkillProcessorEnhanced:
             return {"success": False, "error": "; ".join(errors), "output": {}}
 
         # 检查缓存
+        cache_key = None
         if self._enable_cache and not skip_cache:
             cache_key = self._get_cache_key(skill_id, inputs)
             try:
@@ -981,17 +975,31 @@ class SkillProcessorEnhanced:
                 if cached:
                     cached["from_cache"] = True
                     return cached
-            except:
-                pass  # 缓存失败继续执行
+            except Exception as e:
+                logger.warning("Cache get failed for skill %s: %s", skill_id, e)
 
         # 构建prompt
         prompt = self._build_prompt(skill, inputs, context or {})
 
         # 调用LLM
         start_time = time.time()
+        provider_info = getattr(self._llm, "provider", "unknown")
+        model_info = getattr(self._llm, "model", "unknown")
         try:
-            # write-prd needs more tokens for full markdown output
-            max_tokens = 8000 if skill_id == "write-prd" else 4000
+            # Per-skill max_tokens: smaller limits for steps that output structured JSON
+            _SKILL_MAX_TOKENS = {
+                "write-prd": 8000,
+                "milestone-plan": 4000,
+                "compliance-check": 4000,
+                "medical-review": 5000,
+                "requirement-analysis": 3000,
+                "brainstorm": 2000,
+                "user-story": 2000,
+                "competitive-analysis": 3000,
+                "technical-design": 4000,
+                "test-plan": 3000,
+            }
+            max_tokens = _SKILL_MAX_TOKENS.get(skill_id, 4000)
             response_text = await self._llm.chat(
                 [{"role": "user", "content": prompt}],
                 temperature=0.7,
@@ -1000,6 +1008,11 @@ class SkillProcessorEnhanced:
 
             # 解析JSON输出
             output = self._parse_json_output(response_text, skill_id=skill_id)
+
+            # 检测空输出：记录警告但不中断执行（空输出由下游修复和验证处理）
+            if skill_id != "write-prd":
+                if self._is_empty_output(skill_id, output):
+                    logger.warning("Empty/substantially-incomplete output detected for %s, continuing with fixup", skill_id)
 
             # 修复常见问题
             output = OutputValidator.fix_common_issues(skill_id, output)
@@ -1029,22 +1042,49 @@ class SkillProcessorEnhanced:
                     "completion": len(response_text),
                     "total": len(prompt) + len(response_text)
                 },
+                "provider": provider_info,
+                "model": model_info,
                 "from_cache": False
             }
 
-            # 缓存结果
-            if self._enable_cache:
+            # 结构化链路日志
+            logger.info(
+                "Skill trace: skill=%s provider=%s model=%s time_ms=%d "
+                "prompt_chars=%d completion_chars=%d cached=%s",
+                skill_id, provider_info, model_info, execution_time,
+                len(prompt), len(response_text), False
+            )
+
+            # 缓存结果（skip_cache 时跳过缓存写入）
+            if self._enable_cache and cache_key is not None:
                 try:
                     await cache_manager.set(cache_key, result, ttl=3600)
-                except:
-                    pass
+                except Exception as cache_err:
+                    logger.warning("Cache set failed for skill %s: %s", skill_id, cache_err)
 
             return result
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
+            error_type = type(e).__name__
+            execution_time = int((time.time() - start_time) * 1000)
+            full_tb = traceback.format_exc()
+            input_keys = list(inputs.keys()) if inputs else []
+            logger.error(
+                "Skill trace ERROR: skill=%s provider=%s model=%s time_ms=%d "
+                "error_type=%s error=%s input_keys=%s\n%s",
+                skill_id, provider_info, model_info, execution_time,
+                error_type, str(e), input_keys, full_tb,
+                exc_info=True
+            )
             return {
                 "success": False,
-                "error": f"LLM调用失败: {str(e)}",
+                "error": f"LLM调用失败 [{skill_id}]: {error_type}: {e}",
+                "error_type": error_type,
+                "execution_time": execution_time,
+                "provider": provider_info,
+                "model": model_info,
                 "output": {},
-                "formatted_output": f"## 执行失败\n\n错误: {str(e)}"
+                "formatted_output": "## 执行失败\n\n服务暂时不可用，请稍后重试"
             }

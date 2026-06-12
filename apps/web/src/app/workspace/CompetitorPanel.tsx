@@ -39,6 +39,7 @@ export default function CompetitorPanel({ projectId }: Props) {
 
   useEffect(() => {
     loadCompetitors();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   const resetForm = () => {

@@ -2,12 +2,13 @@
 
 from typing import Optional, Literal
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.responses import ResponseBuilder
 from app.core.security import get_current_user_id
 from app.models.feedback import Feedback
@@ -31,6 +32,7 @@ class FeedbackResponse(BaseModel):
     created_at: datetime
 
 
+@rate_limit(requests=30, window=60)
 @router.post("", response_model=dict)
 async def create_feedback(
     request: FeedbackCreate,
@@ -55,6 +57,7 @@ async def create_feedback(
     })
 
 
+@rate_limit(requests=100, window=60)
 @router.get("", response_model=dict)
 async def list_feedback(
     category: Optional[str] = None,
@@ -64,7 +67,7 @@ async def list_feedback(
     db: AsyncSession = Depends(get_db)
 ):
     """获取反馈列表（管理员用，当前仅返回自己的）"""
-    query = select(Feedback).where(Feedback.user_id == user_id).order_by(desc(Feedback.created_at))
+    query = select(Feedback).where(Feedback.user_id == user_id, Feedback.deleted_at.is_(None)).order_by(desc(Feedback.created_at))
 
     if category:
         query = query.where(Feedback.category == category)

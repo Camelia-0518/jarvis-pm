@@ -1,18 +1,6 @@
 import { create } from 'zustand';
 import { projectApi, prdApi, type Project, type ProjectDetail, type PRD } from '@/lib/api';
-
-// Utility: trigger browser download for blob content (kept outside store to avoid side effects)
-export function downloadFile(content: string, filename: string, contentType: string) {
-  const blob = new Blob([content], { type: contentType });
-  const url = window.URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  window.URL.revokeObjectURL(url);
-  document.body.removeChild(a);
-}
+import { setLoading, setError } from '@/lib/storeHelpers';
 
 interface ProjectState {
   // State
@@ -71,33 +59,27 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   error: null,
 
   fetchProjects: async () => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const { items: projects } = await projectApi.list();
       set({ projects, isLoading: false });
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to fetch projects',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to fetch projects');
     }
   },
 
   fetchProject: async (id: string) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const project = await projectApi.get(id);
       set({ currentProject: project, isLoading: false });
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to fetch project',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to fetch project');
     }
   },
 
   createProject: async (data) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const project = await projectApi.create(data);
       set((state) => ({
@@ -106,16 +88,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }));
       return project;
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to create project',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to create project');
       throw error;
     }
   },
 
   updateProject: async (id, data) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const project = await projectApi.update(id, data);
       set((state) => ({
@@ -126,16 +105,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         isLoading: false,
       }));
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to update project',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to update project');
       throw error;
     }
   },
 
   deleteProject: async (id) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       await projectApi.delete(id);
       set((state) => ({
@@ -144,29 +120,23 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         isLoading: false,
       }));
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to delete project',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to delete project');
       throw error;
     }
   },
 
   fetchPRD: async (id: string) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const prd = await prdApi.get(id);
       set({ currentPRD: prd, isLoading: false });
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to fetch PRD',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to fetch PRD');
     }
   },
 
   createPRD: async (data) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const prd = await prdApi.create(data);
       set((state) => ({
@@ -189,16 +159,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       }));
       return prd;
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to create PRD',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to create PRD');
       throw error;
     }
   },
 
   updatePRD: async (id, data) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const prd = await prdApi.update(id, data);
       set((state) => ({
@@ -206,16 +173,13 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         isLoading: false,
       }));
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to update PRD',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to update PRD');
       throw error;
     }
   },
 
   generateChapter: async (id, chapter, prompt) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const result = await prdApi.generate(id, { chapter, prompt });
       // Refresh PRD to get updated content
@@ -223,25 +187,19 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       set({ currentPRD: prd, isLoading: false });
       return result;
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to generate chapter',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to generate chapter');
       throw error;
     }
   },
 
   exportPRD: async (id, format) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const result = await prdApi.export(id, format);
       set({ isLoading: false });
       return result;
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to export PRD',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to export PRD');
       throw error;
     }
   },

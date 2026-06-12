@@ -17,6 +17,7 @@ from app.core.security import get_current_user_id
 from app.services.ai_service import ai_service
 from app.services.web_crawler import web_crawler_service
 from app.services.data_analysis_upload_service import analyze_uploaded_data
+from app.core.exceptions import AppException
 
 router = APIRouter()
 
@@ -26,7 +27,7 @@ _CACHE_TTL = 3600  # 1 hour
 
 
 def _cache_key(prompt: str) -> str:
-    return hashlib.md5(prompt.encode("utf-8")).hexdigest()
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def _get_cached(prompt: str) -> Optional[str]:
@@ -99,8 +100,8 @@ class PrototypeRequest(BaseModel):
     prototype_type: Optional[str] = "wireframe"
 
 
-@router.post("/user-research", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/user-research")
 async def user_research(
     data: UserResearchRequest,
     user_id: str = Depends(get_current_user_id),
@@ -137,19 +138,18 @@ async def user_research(
     })
 
 
-@router.post("/competitors", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/competitors")
 async def competitor_analysis(
     data: CompetitorAnalysisRequest,
     user_id: str = Depends(get_current_user_id),
     db: AsyncSession = Depends(get_db)
 ):
     """Analyze competitors using AI (with candidate confirmation mode)"""
-    # 获取项目信息
-    from app.models.project import Project
-    project_result = await db.execute(select(Project).where(Project.id == data.project_id))
-    project = project_result.scalar_one_or_none()
-    industry = project.industry if project else "其他"
+    # 获取项目信息（验证归属）
+    from app.core.permissions import require_project_owner
+    project = await require_project_owner(db, data.project_id, user_id)
+    industry = project.industry
 
     # 步骤1：尝试网页抓取
     crawler_results = await web_crawler_service.search_competitor_info(data.competitors)
@@ -234,10 +234,7 @@ async def competitor_analysis(
 
     if not candidates:
         # LLM 也失败，返回空结果
-        return ResponseBuilder.error(
-            code="NO_DATA",
-            message="网络搜索和 AI 推断均未找到竞品信息，请手动输入竞品名称后重试。"
-        )
+        raise AppException("网络搜索和 AI 推断均未找到竞品信息，请手动输入竞品名称后重试。", code="NO_DATA", status_code=400)
 
     # 生成候选预览
     timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -287,8 +284,8 @@ async def competitor_analysis(
     })
 
 
-@router.post("/competitors/confirm", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/competitors/confirm")
 async def confirm_competitor_analysis(
     data: CompetitorAnalysisRequest,
     user_id: str = Depends(get_current_user_id),
@@ -297,13 +294,12 @@ async def confirm_competitor_analysis(
     """用户确认候选竞品后，生成正式竞品分析报告"""
     confirmed = data.confirmed_candidates or []
     if not confirmed:
-        return ResponseBuilder.error(code="NO_CANDIDATES", message="请至少确认一个竞品")
+        raise AppException("请至少确认一个竞品", code="NO_CANDIDATES", status_code=400)
 
-    # 获取项目信息
-    from app.models.project import Project
-    project_result = await db.execute(select(Project).where(Project.id == data.project_id))
-    project = project_result.scalar_one_or_none()
-    industry = project.industry if project else "其他"
+    # 获取项目信息（验证归属）
+    from app.core.permissions import require_project_owner
+    project = await require_project_owner(db, data.project_id, user_id)
+    industry = project.industry
 
     # 构建已确认竞品的详细分析
     competitor_names = [c.get("name", "") for c in confirmed]
@@ -367,8 +363,8 @@ async def confirm_competitor_analysis(
     })
 
 
-@router.post("/data-analysis", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/data-analysis")
 async def data_analysis(
     data: DataAnalysisRequest,
     user_id: str = Depends(get_current_user_id),
@@ -405,8 +401,8 @@ async def data_analysis(
     })
 
 
-@router.post("/stakeholders", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/stakeholders")
 async def stakeholder_analysis(
     data: StakeholderRequest,
     user_id: str = Depends(get_current_user_id),
@@ -470,8 +466,8 @@ async def stakeholder_analysis(
     })
 
 
-@router.post("/review-materials", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/review-materials")
 async def review_materials(
     data: ReviewMaterialRequest,
     user_id: str = Depends(get_current_user_id),
@@ -484,7 +480,7 @@ async def review_materials(
     prd_markdown = None
     if data.prd_id:
         result = await db.execute(
-            select(PRD).where(PRD.id == data.prd_id, PRD.created_by == user_id)
+            select(PRD).where(PRD.id == data.prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
         )
         prd = result.scalar_one_or_none()
         prd_markdown = prd.markdown if prd else None
@@ -492,7 +488,7 @@ async def review_materials(
         # Query the latest PRD for this project
         result = await db.execute(
             select(PRD)
-            .where(PRD.project_id == data.project_id, PRD.created_by == user_id)
+            .where(PRD.project_id == data.project_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
             .order_by(PRD.created_at.desc())
         )
         prd = result.scalars().first()
@@ -536,6 +532,7 @@ PRD 内容：
     })
 
 
+@rate_limit(requests=10, window=60)
 @router.post("/review-materials-stream")
 async def review_materials_stream(
     data: ReviewMaterialRequest,
@@ -549,14 +546,14 @@ async def review_materials_stream(
     prd_markdown = None
     if data.prd_id:
         result = await db.execute(
-            select(PRD).where(PRD.id == data.prd_id, PRD.created_by == user_id)
+            select(PRD).where(PRD.id == data.prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
         )
         prd = result.scalar_one_or_none()
         prd_markdown = prd.markdown if prd else None
     else:
         result = await db.execute(
             select(PRD)
-            .where(PRD.project_id == data.project_id, PRD.created_by == user_id)
+            .where(PRD.project_id == data.project_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
             .order_by(PRD.created_at.desc())
         )
         prd = result.scalars().first()
@@ -587,8 +584,8 @@ async def review_materials_stream(
     )
 
 
-@router.post("/prototype", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/prototype")
 async def prototype(
     data: PrototypeRequest,
     user_id: str = Depends(get_current_user_id),
@@ -631,6 +628,7 @@ async def prototype(
     })
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/stats/{project_id}", response_model=dict)
 async def get_stats(
     project_id: str,
@@ -646,8 +644,8 @@ async def get_stats(
     })
 
 
-@router.post("/data-analysis-upload", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/data-analysis-upload")
 async def data_analysis_upload(
     file: UploadFile = File(...),
     project_id: str = Form(...),

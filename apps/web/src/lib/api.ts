@@ -3,7 +3,7 @@
  * Connects to FastAPI backend
  */
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api/v1';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8000/api/v1';
 
 // Single-user mode: no token management needed
 
@@ -16,6 +16,14 @@ export class ApiError extends Error {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+function buildQuery(params?: Record<string, unknown>): string {
+  if (!params) return '';
+  const parts = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== '')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+  return parts.length > 0 ? `?${parts.join('&')}` : '';
 }
 
 function getFriendlyErrorMessage(error: unknown, endpoint: string): string {
@@ -39,7 +47,7 @@ function getFriendlyErrorMessage(error: unknown, endpoint: string): string {
 }
 
 // Request helper
-async function request<T>(
+export async function request<T>(
   endpoint: string,
   options: RequestInit & { timeoutMs?: number; _retry?: boolean } = {}
 ): Promise<T> {
@@ -171,37 +179,54 @@ async function request<T>(
 // ==================== Auth API ====================
 
 export const authApi = {
-  login: async () => {
-    // Single-user mode: no-op
-    return { access_token: '', token_type: 'bearer', user: {} as User };
+  login: async (email: string, password: string) => {
+    const data = await request<{ access_token: string; refresh_token: string; token_type: string }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+    if (data.access_token) {
+      if (typeof window !== 'undefined') localStorage.setItem('access_token', data.access_token);
+    }
+    if (data.refresh_token) {
+      if (typeof window !== 'undefined') localStorage.setItem('refresh_token', data.refresh_token);
+    }
+    return data;
   },
 
-  register: async () => {
-    // Single-user mode: no-op
-    return { access_token: '', token_type: 'bearer', user: {} as User };
+  register: async (email: string, password: string, name: string) => {
+    const data = await request<{ access_token: string; refresh_token: string; token_type: string }>('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, name }),
+    });
+    if (data.access_token) {
+      if (typeof window !== 'undefined') localStorage.setItem('access_token', data.access_token);
+    }
+    if (data.refresh_token) {
+      if (typeof window !== 'undefined') localStorage.setItem('refresh_token', data.refresh_token);
+    }
+    return data;
   },
 
   logout: () => {
-    // Single-user mode: no-op
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+    }
   },
 
-  getCurrentUser: async () => {
-    return request<User>('/auth/me');
-  },
+  getCurrentUser: async () => request<User>('/auth/me'),
 
-  isAuthenticated: () => true,
+  isAuthenticated: () => {
+    if (typeof window === 'undefined') return false;
+    return !!localStorage.getItem('access_token');
+  },
 };
 
 // ==================== Project API ====================
 
 export const projectApi = {
   list: async (params?: { page?: number; limit?: number; status?: string; industry?: string }) => {
-    const queryParts: string[] = [];
-    if (params?.page !== undefined) queryParts.push(`page=${params.page}`);
-    if (params?.limit !== undefined) queryParts.push(`limit=${params.limit}`);
-    if (params?.status) queryParts.push(`status=${encodeURIComponent(params.status)}`);
-    if (params?.industry) queryParts.push(`industry=${encodeURIComponent(params.industry)}`);
-    const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+    const query = buildQuery(params);
     return request<{ items: Project[]; total: number; page: number; limit: number }>(`/projects${query}`);
   },
 
@@ -289,11 +314,7 @@ export interface ProjectHealthResponse {
 
 export const prdApi = {
   list: async (params?: { projectId?: string; limit?: number; offset?: number }) => {
-    const queryParts: string[] = [];
-    if (params?.projectId) queryParts.push(`project_id=${encodeURIComponent(params.projectId)}`);
-    if (params?.limit !== undefined) queryParts.push(`limit=${params.limit}`);
-    if (params?.offset !== undefined) queryParts.push(`offset=${params.offset}`);
-    const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+    const query = buildQuery(params && { project_id: params.projectId, limit: params.limit, offset: params.offset });
     return request<{ items: PRD[]; total: number }>(`/prds${query}`);
   },
 
@@ -451,13 +472,7 @@ export const prdApi = {
   },
 
   versions: async (id: string, params?: { limit?: number; offset?: number }) => {
-    const query = params
-      ? '?' +
-        Object.entries(params)
-          .filter(([, v]) => v !== undefined)
-          .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-          .join('&')
-      : '';
+    const query = buildQuery(params);
     return request<{ items: PRDVersionItem[]; total: number }>(`/prds/${id}/versions${query}`);
   },
 
@@ -766,13 +781,7 @@ export const skillsApi = {
     limit?: number;
     offset?: number;
   }) => {
-    const query = params
-      ? '?' +
-        Object.entries(params)
-          .filter(([, v]) => v !== undefined)
-          .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-          .join('&')
-      : '';
+    const query = buildQuery(params);
     return request<
       SkillExecutionRecord[]
     >(`/skills/executions${query}`);
@@ -976,13 +985,7 @@ export const aiApi = {
 
 export const annotationApi = {
   list: async (prdId: string, params?: { status?: string; chapter_num?: string; limit?: number; offset?: number }) => {
-    const query = params
-      ? '?' +
-        Object.entries(params)
-          .filter(([, v]) => v !== undefined)
-          .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-          .join('&')
-      : '';
+    const query = buildQuery(params);
     return request<{
       items: AnnotationItem[];
       total: number;
@@ -1060,7 +1063,7 @@ export const annotationApi = {
 
 export const revisionTaskApi = {
   list: async (prdId: string, params?: { status?: string }) => {
-    const query = params?.status ? `?status=${encodeURIComponent(params.status)}` : '';
+    const query = buildQuery({ status: params?.status });
     return request<Array<{
       id: string;
       prd_id: string;
@@ -1184,13 +1187,7 @@ export const feedbackApi = {
   },
 
   list: async (params?: { category?: string; limit?: number; offset?: number }) => {
-    const query = params
-      ? '?' +
-        Object.entries(params)
-          .filter(([, v]) => v !== undefined)
-          .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-          .join('&')
-      : '';
+    const query = buildQuery(params);
     return request<
       { items: FeedbackItem[]; total: number }
     >(`/feedback${query}`);
@@ -1214,13 +1211,7 @@ export interface PromptTemplate {
 
 export const promptApi = {
   list: async (params?: { name?: string; tag?: string; is_active?: boolean; page?: number; limit?: number }) => {
-    const queryParts: string[] = [];
-    if (params?.name) queryParts.push(`name=${encodeURIComponent(params.name)}`);
-    if (params?.tag) queryParts.push(`tag=${encodeURIComponent(params.tag)}`);
-    if (params?.is_active !== undefined) queryParts.push(`is_active=${params.is_active}`);
-    if (params?.page) queryParts.push(`page=${params.page}`);
-    if (params?.limit) queryParts.push(`limit=${params.limit}`);
-    const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+    const query = buildQuery(params);
     return request<{ items: PromptTemplate[]; total: number; page: number; limit: number }>(`/prompts${query}`);
   },
 
@@ -1361,68 +1352,6 @@ export const workflowApi = {
   },
 };
 
-// ==================== Battle API ====================
-
-export const battleApi = {
-  list: async (params?: { status?: string; page?: number; limit?: number }) => {
-    const query = params
-      ? '?' +
-        Object.entries(params)
-          .filter(([, v]) => v !== undefined)
-          .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-          .join('&')
-      : '';
-    return request<{ data: Battle[]; meta: PaginationMeta }>(`/battles${query}`);
-  },
-
-  get: async (id: string) => {
-    return request<Battle>(`/battles/${id}`);
-  },
-
-  create: async (data: {
-    name: string;
-    description?: string;
-    project_id?: string;
-    prd_id?: string;
-    days?: BattleDay[];
-  }) => {
-    return request<Battle>('/battles', {
-      method: 'POST',
-      body: JSON.stringify(data),
-    });
-  },
-
-  update: async (
-    id: string,
-    data: {
-      name?: string;
-      description?: string;
-      status?: string;
-      current_day?: number;
-      days?: BattleDay[];
-      project_id?: string;
-      prd_id?: string;
-    }
-  ) => {
-    return request<Battle>(`/battles/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(data),
-    });
-  },
-
-  delete: async (id: string) => {
-    return request<{ message: string; id: string }>(`/battles/${id}`, {
-      method: 'DELETE',
-    });
-  },
-
-  advance: async (id: string) => {
-    return request<Battle>(`/battles/${id}/advance`, {
-      method: 'POST',
-    });
-  },
-};
-
 // ==================== Personas API ====================
 
 export interface Persona {
@@ -1553,13 +1482,7 @@ export interface PriorityMatrix {
 
 export const requirementApi = {
   list: async (projectId: string, params?: { sort_by?: string; order?: string }) => {
-    const query = params
-      ? '?' +
-        Object.entries(params)
-          .filter(([, v]) => v !== undefined)
-          .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
-          .join('&')
-      : '';
+    const query = buildQuery(params);
     return request<Requirement[]>(`/projects/${projectId}/requirements${query}`);
   },
 
@@ -1737,6 +1660,8 @@ export interface Project {
   industry: string;
   status: string;
   prd_count: number;
+  created_by?: string;
+  workspace_id?: string;
   created_at: string;
   updated_at: string | null;
 }
@@ -1773,6 +1698,8 @@ export interface PRD {
     industry: string;
   };
   markdown: string;
+  created_by?: string;
+  workspace_id?: string;
   created_at: string;
   updated_at: string | null;
 }
@@ -1839,28 +1766,6 @@ export interface Prototype {
   user_flows: Record<string, unknown>[];
   markdown: string;
   created_at: string;
-}
-
-export interface BattleDay {
-  day: string;
-  task: string;
-  status: 'pending' | 'in-progress' | 'completed';
-  tool: string;
-  notes: string;
-}
-
-export interface Battle {
-  id: string;
-  name: string;
-  description: string | null;
-  project_id: string | null;
-  prd_id: string | null;
-  status: 'active' | 'completed' | 'cancelled';
-  current_day: number;
-  total_days: number;
-  days: BattleDay[];
-  created_at: string;
-  updated_at: string | null;
 }
 
 export interface PaginationMeta {
@@ -1992,11 +1897,7 @@ export interface Template {
 
 export const templateApi = {
   list: async (params?: { page?: number; limit?: number; industry?: string }) => {
-    const queryParts: string[] = [];
-    if (params?.page !== undefined) queryParts.push(`page=${params.page}`);
-    if (params?.limit !== undefined) queryParts.push(`limit=${params.limit}`);
-    if (params?.industry) queryParts.push(`industry=${encodeURIComponent(params.industry)}`);
-    const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+    const query = buildQuery(params);
     return request<{ items: Template[]; total: number; page: number; limit: number }>(`/templates${query}`);
   },
 
@@ -2069,6 +1970,8 @@ export interface WbsTask {
   role: string;
   priority: string;
   phase: string;
+  /** Runtime extensions — set by frontend during editing. */
+  status?: string;
 }
 
 export interface MilestonePhase {
@@ -2080,6 +1983,13 @@ export interface MilestonePhase {
   deliverables: string[];
   milestone: string;
   checkpoint: boolean;
+  /** Agent / runtime extensions — may not be present in all data. */
+  progress?: number;
+  templates?: string[];
+  /** Alternate field names from agent output */
+  duration?: number;
+  startDate?: string;
+  endDate?: string;
 }
 
 export interface GanttItem {
@@ -2106,6 +2016,9 @@ export interface RiskItem {
   contingency: string;
   trigger: string;
   owner: string;
+  /** Alternate field names from agent output */
+  description?: string;
+  mitigation?: string;
 }
 
 export interface Stakeholder {
@@ -2180,6 +2093,7 @@ export interface DeliveryPlanDetail extends DeliveryPlanSummary {
 
 export interface DeliveryDashboardData {
   total_plans: number;
+  draft: number;
   at_risk: number;
   in_progress: number;
   completed: number;
@@ -2187,6 +2101,17 @@ export interface DeliveryDashboardData {
   high_risks: number;
   risk_health: 'red' | 'yellow' | 'green';
   delivery_health: 'red' | 'yellow' | 'green';
+  total_tasks: number;
+  completed_tasks: number;
+  in_progress_tasks: number;
+  task_completion_rate: number;
+  total_phases: number;
+  avg_phase_progress: number;
+  overdue_phases: number;
+  health_detail: {
+    risk: { score: string; at_risk_plans: number; high_risk_ratio: number; avg_risks_per_plan: number };
+    delivery: { score: string; active_ratio: number; task_completion: number; overdue_phases: number };
+  };
 }
 
 // ==================== Delivery API ====================
@@ -2223,12 +2148,7 @@ export const deliveryApi = {
   },
 
   list: async (params?: { project_id?: string; status?: string; page?: number; limit?: number }) => {
-    const queryParts: string[] = [];
-    if (params?.project_id) queryParts.push(`project_id=${encodeURIComponent(params.project_id)}`);
-    if (params?.status) queryParts.push(`status=${encodeURIComponent(params.status)}`);
-    if (params?.page) queryParts.push(`page=${params.page}`);
-    if (params?.limit) queryParts.push(`limit=${params.limit}`);
-    const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+    const query = buildQuery(params);
     return request<{ items: DeliveryPlanSummary[]; total: number; page: number; limit: number }>(
       `/delivery/plans${query}`
     );
@@ -2238,8 +2158,8 @@ export const deliveryApi = {
     return request<DeliveryPlanDetail>(`/delivery/plans/${id}`);
   },
 
-  update: async (id: string, data: { status?: string; title?: string }) => {
-    return request<void>(`/delivery/plans/${id}`, {
+  update: async (id: string, data: Record<string, unknown>) => {
+    return request<DeliveryPlanDetail>(`/delivery/plans/${id}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
@@ -2252,7 +2172,7 @@ export const deliveryApi = {
   },
 
   getDashboard: async (projectId?: string) => {
-    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+    const query = buildQuery({ project_id: projectId });
     return request<DeliveryDashboardData>(`/delivery/dashboard${query}`);
   },
 };
@@ -2283,11 +2203,7 @@ export interface MethodologyTemplate {
 
 export const methodologyApi = {
   list: async (params?: { industry?: string; page?: number; limit?: number }) => {
-    const queryParts: string[] = [];
-    if (params?.industry) queryParts.push(`industry=${encodeURIComponent(params.industry)}`);
-    if (params?.page !== undefined) queryParts.push(`page=${params.page}`);
-    if (params?.limit !== undefined) queryParts.push(`limit=${params.limit}`);
-    const query = queryParts.length > 0 ? `?${queryParts.join('&')}` : '';
+    const query = buildQuery(params);
     return request<{ items: MethodologyTemplate[]; total: number }>(`/methodologies${query}`);
   },
 
@@ -2312,5 +2228,149 @@ export const methodologyApi = {
 
   delete: async (id: string) => {
     return request<void>(`/methodologies/${id}`, { method: 'DELETE' });
+  },
+};
+
+// ==================== Retrospectives API ====================
+
+export interface RetroLessonItem {
+  id: string;
+  category: string;
+  lesson: string;
+  action_item: string;
+  impact?: string;
+  owner?: string;
+}
+
+export interface RetroLessons {
+  id: string;
+  project_id: string;
+  title: string;
+  lessons: RetroLessonItem[];
+  ai_analysis?: string;
+  created_at?: string;
+}
+
+export const retrospectiveApi = {
+  list: async (params?: { limit?: number }) => {
+    const query = buildQuery(params);
+    return request<{ items: RetroLessons[]; total: number }>(`/retrospectives${query}`);
+  },
+
+  create: async (data: { project_id: string; title: string; lessons: RetroLessonItem[] }) => {
+    return request<RetroLessons>('/retrospectives', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  aiAnalyze: async (id: string) => {
+    return request<{ success: boolean; data: Record<string, unknown> }>(`/retrospectives/${id}/ai-analyze`, {
+      method: 'POST',
+    });
+  },
+};
+
+// ── Jobs ──
+
+export interface JobInfo {
+  id: string;
+  job_type: string | null;
+  status: string | null;
+  failure_type: string | null;
+  project_id: string | null;
+  prd_id: string | null;
+  task_id: string | null;
+  triggered_by: string;
+  attempt: number;
+  max_attempts: number;
+  duration_ms: number | null;
+  error_message: string | null;
+  error_code: string | null;
+  retryable: boolean;
+  retry_backoff_seconds: number | null;
+  next_retry_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string | null;
+}
+
+// ── System ──
+
+export const systemApi = {
+  health: async () => request<{ status: string; database: string; feature_tiers: { total_endpoints: number; by_tier: Record<string, number>; production_pct: number } }>('/system/health'),
+  featureTiers: async () => request<{ summary: Record<string, unknown>; tiers: Record<string, string> }>('/system/feature-tiers'),
+};
+
+export const jobsApi = {
+  list: async (params?: Record<string, string | number | undefined>) => {
+    const query = buildQuery(params);
+    return request<{ items: JobInfo[]; total: number; page: number; limit: number }>(`/jobs${query}`);
+  },
+  get: async (id: string) => request<JobInfo>(`/jobs/${id}`),
+  retry: async (id: string) =>
+    request<{ id: string; attempt: number; next_retry_at: string | null; backoff_seconds: number; message: string }>(`/jobs/${id}/retry`, { method: 'POST' }),
+};
+
+// ── Workspaces ──
+
+export interface WorkspaceInfo {
+  workspace_id: string;
+  name: string;
+  slug: string;
+  role: string;
+  joined_at: string | null;
+}
+
+export interface WorkspaceMember {
+  user_id: string;
+  email: string;
+  name: string;
+  role: string;
+  joined_at: string | null;
+}
+
+export const workspaceApi = {
+  list: async () => request<WorkspaceInfo[]>('/workspaces'),
+
+  create: async (data: { name: string; slug: string }) =>
+    request<WorkspaceInfo>('/workspaces', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  getMembers: async (workspaceId: string) =>
+    request<WorkspaceMember[]>(`/workspaces/${workspaceId}/members`),
+
+  updateMemberRole: async (workspaceId: string, userId: string, role: string) =>
+    request<{ message: string }>(`/workspaces/${workspaceId}/members/${userId}`, {
+      method: 'PUT',
+      body: JSON.stringify({ user_id: userId, role }),
+    }),
+
+  invite: async (workspaceId: string, email: string, role: string) =>
+    request<{ message: string }>(`/workspaces/${workspaceId}/invite`, {
+      method: 'POST',
+      body: JSON.stringify({ email, role }),
+    }),
+};
+
+// ── Audit ──
+
+export interface AuditEntry {
+  id: string;
+  user_id: string;
+  workspace_id: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string | null;
+  summary: string | null;
+  created_at: string;
+}
+
+export const auditApi = {
+  list: async (params?: Record<string, string>) => {
+    const query = buildQuery(params);
+    return request<AuditEntry[]>(`/system/audit${query}`);
   },
 };

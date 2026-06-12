@@ -98,6 +98,7 @@ export default function RequirementPanel({ projectId }: Props) {
     } else {
       loadMatrix();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, view, sortBy, order]);
 
   const resetForm = () => {

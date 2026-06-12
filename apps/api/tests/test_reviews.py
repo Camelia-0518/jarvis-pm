@@ -97,7 +97,7 @@ async def test_get_checklist_default_industry(async_client: AsyncClient, db_sess
 async def test_get_checklist_not_found(async_client: AsyncClient):
     """GET should return error for non-existent project."""
     response = await async_client.get("/api/v1/projects/non-existent-id/reviews/checklist")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -174,7 +174,7 @@ async def test_submit_checklist_not_found(async_client: AsyncClient):
         "/api/v1/projects/non-existent-id/reviews/checklist",
         json=payload,
     )
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False

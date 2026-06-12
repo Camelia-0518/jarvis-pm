@@ -1,0 +1,134 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-pm-api"
+version = "1.0.0"
+description = "Jarvis PM - AI-powered product management platform API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [
+    {name = "Jarvis PM Team"},
+]
+keywords = ["fastapi", "product-management", "ai", "prd", "api"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Framework :: FastAPI",
+]
+
+dependencies = [
+    # Web Framework
+    "fastapi==0.109.2",
+    "uvicorn[standard]==0.27.1",
+    "python-multipart==0.0.9",
+    "httpx==0.26.0",
+
+    # Database
+    "sqlalchemy==2.0.25",
+    "alembic==1.13.1",
+    "asyncpg==0.29.0",
+    "psycopg2-binary==2.9.9",
+    "aiosqlite==0.19.0",
+
+    # Cache
+    "redis==5.0.1",
+    "cachetools==5.3.2",
+
+    # Validation & Settings
+    "pydantic==2.6.1",
+    "pydantic-settings==2.1.0",
+    "email-validator==2.1.0",
+    "python-dotenv==1.0.0",
+
+    # Auth
+    "python-jose[cryptography]==3.3.0",
+    "passlib[bcrypt]==1.7.4",
+
+    # AI / LLM
+    "anthropic==0.18.1",
+    "openai==1.12.0",
+
+    # RAG / Vector Search
+    "scikit-learn==1.4.0",
+    "numpy==1.26.3",
+    "sentence-transformers==2.3.1",
+    "jieba==0.42.1",
+
+    # Document Generation
+    "python-docx==1.1.0",
+    "fpdf2==2.7.8",
+    "markdown==3.5.2",
+
+    # Utils
+    "pyyaml==6.0.1",
+    "watchdog==3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.0.0",
+    "pytest-asyncio==0.23.5",
+    "pytest-cov>=4.1.0",
+    "black>=24.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/jarvis-pm/api"
+Repository = "https://github.com/jarvis-pm/api"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+exclude = ["tests*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  migrations
+)/
+'''
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "W",   # pycodestyle warnings
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]  # unused imports in init files
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

@@ -162,7 +162,7 @@ async def test_get_prd_success(async_client: AsyncClient, sample_prd: PRD):
 async def test_get_prd_not_found(async_client: AsyncClient):
     """GET /api/v1/prds/{id} should return 404 for non-existent PRD."""
     response = await async_client.get("/api/v1/prds/non-existent-id")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -216,11 +216,11 @@ async def test_update_prd_invalid_status(async_client: AsyncClient, sample_prd: 
     """PUT /api/v1/prds/{id} should reject invalid status values."""
     payload = {"status": "nonexistent"}
     response = await async_client.put(f"/api/v1/prds/{sample_prd.id}", json=payload)
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 400  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
-    assert data["error"]["code"] == "INVALID_STATUS"
+    assert data["error"]["code"] in ("INVALID_STATUS", "INVALID_STATE_TRANSITION")
 
 
 @pytest.mark.integration
@@ -228,7 +228,7 @@ async def test_update_prd_not_found(async_client: AsyncClient):
     """PUT /api/v1/prds/{id} should return error for non-existent PRD."""
     payload = {"title": "Updated"}
     response = await async_client.put("/api/v1/prds/non-existent-id", json=payload)
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -239,7 +239,7 @@ async def test_update_prd_not_found(async_client: AsyncClient):
 
 @pytest.mark.integration
 async def test_delete_prd_success(async_client: AsyncClient, sample_prd: PRD, db_session: AsyncSession):
-    """DELETE /api/v1/prds/{id} should hard-delete the PRD."""
+    """DELETE /api/v1/prds/{id} should soft-delete the PRD."""
     response = await async_client.delete(f"/api/v1/prds/{sample_prd.id}")
     assert response.status_code == 200
 
@@ -248,19 +248,16 @@ async def test_delete_prd_success(async_client: AsyncClient, sample_prd: PRD, db
     assert data["data"]["deleted"] is True
     assert data["data"]["id"] == sample_prd.id
 
-    # Verify hard delete in DB
-    result = await db_session.execute(
-        select(PRD).where(PRD.id == sample_prd.id)
-    )
-    prd = result.scalar_one_or_none()
-    assert prd is None
+    # Verify soft delete in DB (record exists, deleted_at is set)
+    await db_session.refresh(sample_prd)
+    assert sample_prd.deleted_at is not None
 
 
 @pytest.mark.integration
 async def test_delete_prd_not_found(async_client: AsyncClient):
     """DELETE /api/v1/prds/{id} should return error for non-existent PRD."""
     response = await async_client.delete("/api/v1/prds/non-existent-id")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -271,19 +268,18 @@ async def test_delete_prd_not_found(async_client: AsyncClient):
 
 @pytest.mark.integration
 async def test_create_prd_for_nonexistent_project(async_client: AsyncClient):
-    """POST /api/v1/prds should handle creation for a non-existent project gracefully."""
+    """POST /api/v1/prds with non-existent project should return 404."""
     payload = {
         "project_id": "non-existent-project-id",
         "title": "Orphan PRD",
         "template": "default",
     }
     response = await async_client.post("/api/v1/prds", json=payload)
-    # The endpoint allows creating PRDs for non-existent projects (no FK check enforced)
-    assert response.status_code == 200
+    assert response.status_code == 404
 
     data = response.json()
-    assert data["success"] is True
-    assert data["data"]["title"] == "Orphan PRD"
+    assert data["success"] is False
+    assert data["error"]["code"] == "NOT_FOUND"
 
 
 @pytest.mark.integration

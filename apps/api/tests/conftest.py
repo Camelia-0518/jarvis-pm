@@ -212,6 +212,33 @@ def mock_memory_indexer(monkeypatch):
     monkeypatch.setattr(_mi_mod, "memory_indexer", _FakeIndexer())
 
 
+@pytest.fixture(autouse=True)
+def mock_ai_services(monkeypatch):
+    """Globally mock external AI/LLM calls to prevent network access during tests.
+
+    This ensures CRUD tests don't accidentally trigger real LLM connections
+    via background tasks (e.g., compliance check on PRD update).
+    """
+    from unittest.mock import AsyncMock
+
+    # Mock ai_service.chat — the primary LLM call point
+    import app.services.ai_service as _ai_mod
+    _fake_chat = AsyncMock(return_value="Mock AI response for testing")
+    monkeypatch.setattr(_ai_mod.ai_service, "chat", _fake_chat)
+
+    # Mock ComplianceChecker — used in background re-review tasks
+    try:
+        from app.agents.agents.compliance_checker import ComplianceChecker
+        _fake_result = AsyncMock()
+        _fake_result.success = True
+        _fake_result.output = "Mock compliance check passed"
+        _fake_result.error = None
+        _fake_result.compliance_score = 85.0
+        monkeypatch.setattr(ComplianceChecker, "execute", AsyncMock(return_value=_fake_result))
+    except ImportError:
+        pass
+
+
 # ============== Sample Data Fixtures ==============
 
 # User ID that matches single-user mode auth

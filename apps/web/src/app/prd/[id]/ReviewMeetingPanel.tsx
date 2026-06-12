@@ -60,7 +60,7 @@ export default function ReviewMeetingPanel({ prdId, chapters }: Props) {
   const [newOpinion, setNewOpinion] = useState({
     chapterNum: '',
     content: '',
-    priority: 'medium' as const,
+    priority: 'medium' as 'high' | 'medium' | 'low',
     reviewer: '',
   });
 
@@ -320,7 +320,7 @@ export default function ReviewMeetingPanel({ prdId, chapters }: Props) {
                                 <div className="flex gap-1">
                                   <select
                                     value={newOpinion.priority}
-                                    onChange={(e) => setNewOpinion({ ...newOpinion, priority: e.target.value as any })}
+                                    onChange={(e) => setNewOpinion({ ...newOpinion, priority: e.target.value as 'high' | 'medium' | 'low' })}
                                     className="rounded border border-slate-200 bg-white px-2 py-1 text-[11px] dark:border-slate-600 dark:bg-slate-700 dark:text-slate-300"
                                   >
                                     <option value="high">高优先级</option>

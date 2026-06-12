@@ -6,7 +6,7 @@ PRD 生成服务 - 端到端PRD生成功能
 整合所有组件，提供完整的PRD生成、存储和导出功能
 """
 
-import os
+
 import json
 import logging
 import re
@@ -17,8 +17,8 @@ from pathlib import Path
 from app.agents.agents.prd_agent import PRDAgent
 from app.agents.templates import get_template_system, IndustryType
 from app.agents.integrations.obsidian import ObsidianIntegration
-from app.agents.persistence import get_persistence, WorkflowState
-from app.services.ai_service import ai_service
+from app.agents.persistence import get_persistence
+
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,9 @@ class PRDGeneratorService:
             "target_users": target_users or self._extract_target_users(description),
             "key_features": key_features or self._extract_key_features(description),
             "industry": industry,
-            "template": template.id if template else None
+            "template_id": template.id if template else None,
+            "skip_evaluation": True,  # 默认跳过评估以加快速度
+            "mode": "full",  # 默认完整生成模式
         }
 
         # 4. 生成PRD
@@ -420,6 +422,26 @@ class PRDGeneratorService:
                 "format": "feishu"
             }
 
+        elif format == "feishu_card":
+            # 飞书消息卡片 JSON（可粘贴进飞书机器人/消息）
+            card = self._convert_to_feishu_card(content, filename)
+            return {
+                "success": True,
+                "content": json.dumps(card, ensure_ascii=False, indent=2),
+                "filename": f"{filename}_card.json",
+                "format": "feishu_card"
+            }
+
+        elif format == "wechat_work":
+            # 企业微信 Markdown 消息格式
+            wx_content = self._convert_to_wechat_work(content)
+            return {
+                "success": True,
+                "content": wx_content,
+                "filename": f"{filename}_wechat.md",
+                "format": "wechat_work"
+            }
+
         else:
             return {
                 "success": False,
@@ -473,6 +495,62 @@ version: 1.0
 """
 
         return header + feishu_content
+
+    def _convert_to_feishu_card(self, content: str, title: Optional[str] = None) -> Dict[str, Any]:
+        """转换为飞书消息卡片 JSON 格式"""
+        title = title or "项目 PRD"
+        for line in content.split("\n"):
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+
+        sections = []
+        current_h2 = ""
+        current_text: list[str] = []
+        for line in content.split("\n"):
+            if line.startswith("## "):
+                if current_h2 and current_text:
+                    sections.append({"heading": current_h2, "text": "\n".join(current_text[:10])})
+                    current_text = []
+                current_h2 = line[3:].strip()
+            elif current_h2:
+                current_text.append(line.strip())
+
+        if current_h2 and current_text:
+            sections.append({"heading": current_h2, "text": "\n".join(current_text[:10])})
+
+        elements: list[dict] = [
+            {"tag": "markdown", "content": f"**{title}**\n生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"}
+        ]
+        for s in sections[:5]:
+            elements.append({"tag": "hr"})
+            elements.append({"tag": "markdown", "content": f"**{s['heading']}**\n{s['text'][:200]}"})
+
+        return {
+            "msg_type": "interactive",
+            "card": {
+                "header": {"title": {"tag": "plain_text", "content": title}},
+                "elements": elements,
+            }
+        }
+
+    def _convert_to_wechat_work(self, content: str) -> str:
+        """转换为企业微信 Markdown 消息格式"""
+        result: list[str] = []
+        for line in content.split("\n"):
+            if line.startswith("#"):
+                result.append(line)
+            elif line.strip().startswith("- "):
+                result.append(f"> {line.strip()[2:]}")
+            elif line.startswith("|---") or line.startswith("| ---"):
+                continue
+            elif line.startswith("|"):
+                cells = [c.strip() for c in line.split("|") if c.strip()]
+                result.append(" · ".join(cells))
+            else:
+                result.append(line)
+
+        return "\n".join(result)
 
 
 # 全局服务实例

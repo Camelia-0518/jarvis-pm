@@ -17,8 +17,8 @@ interface Props {
 }
 
 export default function ReviewPanel({
-  items,
-  state,
+  items: rawItems,
+  state: rawState,
   onToggle,
   onNoteChange,
   loading,
@@ -30,8 +30,12 @@ export default function ReviewPanel({
 }: Props) {
   const [isOpen, setIsOpen] = useState(false);
 
-  const checkedCount = Object.values(state).filter((s) => s.checked).length;
-  const categories = Array.from(new Set(items.map((i) => i.category)));
+  // Bulletproof: guard against corrupted data from old PRDs / broken localStorage
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  const state = rawState && typeof rawState === "object" && !Array.isArray(rawState) ? rawState : {};
+
+  const checkedCount = Object.values(state).filter((s) => s?.checked).length;
+  const categories = Array.from(new Set(items.map((i) => i?.category || "其他")));
 
   return (
     <div className="mt-6">

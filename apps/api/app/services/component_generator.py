@@ -4,8 +4,8 @@
 """
 
 import re
-import json
-from typing import Dict, List, Optional, Any, Union
+
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from enum import Enum
 

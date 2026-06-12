@@ -4,16 +4,18 @@
 Intent Classifier Agent
 """
 
+import logging
 import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import json
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 from ..base import BaseAgent, AgentResult, AgentState
-from ..llm_client import create_default_client
+
+logger = logging.getLogger(__name__)
 
 
 class IntentClassifier(BaseAgent):
@@ -53,43 +55,30 @@ class IntentClassifier(BaseAgent):
 
     SYSTEM_PROMPT = """You are an intent classification expert."""
 
-    def __init__(self, llm_client=None, **kwargs):
-        super().__init__(llm_client=llm_client or create_default_client(), **kwargs)
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
+        user_input = input_data.get("user_input", "")
+        if not user_input:
+            raise ValueError("user_input is required")
 
-    async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
-        start_time = datetime.now()
-        self._set_state(AgentState.RUNNING)
+        step1 = self._create_step("rule_match", "Rule matching")
+        rule_result = self._rule_based_classify(user_input)
+        self._complete_step(step1, f"Rule match: {rule_result['task_type']}")
 
-        try:
-            user_input = input_data.get("user_input", "")
-            if not user_input:
-                raise ValueError("user_input is required")
+        step2 = self._create_step("llm_analysis", "LLM analysis")
+        llm_result = await self._llm_classify(user_input)
+        self._complete_step(step2, f"LLM confidence: {llm_result.get('confidence', 0)}")
 
-            step1 = self._create_step("rule_match", "Rule matching")
-            rule_result = self._rule_based_classify(user_input)
-            self._complete_step(step1, f"Rule match: {rule_result['task_type']}")
+        step3 = self._create_step("merge", "Merge results")
+        final_result = self._merge_results(rule_result, llm_result)
+        self._complete_step(step3, f"Final type: {final_result['task_type']}")
 
-            step2 = self._create_step("llm_analysis", "LLM analysis")
-            llm_result = await self._llm_classify(user_input)
-            self._complete_step(step2, f"LLM confidence: {llm_result.get('confidence', 0)}")
 
-            step3 = self._create_step("merge", "Merge results")
-            final_result = self._merge_results(rule_result, llm_result)
-            self._complete_step(step3, f"Final type: {final_result['task_type']}")
-
-            execution_time = (datetime.now() - start_time).total_seconds()
-            self._set_state(AgentState.COMPLETED)
-
-            return AgentResult(
-                success=True,
-                output=f"Intent: {final_result['task_type']} (confidence: {final_result['confidence']:.2f})",
-                data=final_result,
-                execution_time=execution_time
-            )
-
-        except Exception as e:
-            self._set_state(AgentState.FAILED)
-            return AgentResult(success=False, error=str(e))
+        return AgentResult(
+            success=True,
+            output=f"Intent: {final_result['task_type']} (confidence: {final_result['confidence']:.2f})",
+            data=final_result,
+            execution_time=self.elapsed_seconds
+        )
 
     def _rule_based_classify(self, user_input: str) -> Dict[str, Any]:
         user_input_lower = user_input.lower()
@@ -117,7 +106,8 @@ class IntentClassifier(BaseAgent):
         try:
             response = await self._call_llm(prompt=prompt, system_prompt=self.SYSTEM_PROMPT)
             return json.loads(response)
-        except:
+        except Exception:
+            logger.warning("LLM intent classification failed, falling back to unknown", exc_info=True)
             return {"task_type": "unknown", "confidence": 0.5, "entities": {}}
 
     def _merge_results(self, rule_result: Dict, llm_result: Dict) -> Dict[str, Any]:

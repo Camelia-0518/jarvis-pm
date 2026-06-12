@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { toolsApi, ragApi, prdApi, type PRDSummary } from "@/lib/api";
+import { toolsApi, ragApi, prdApi, jobsApi, type PRDSummary, type JobInfo } from "@/lib/api";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -200,12 +200,52 @@ export default function ToolPanel({ toolId, projectId, prds }: Props) {
     memory: "语义检索",
   };
 
+  const [recentJobs, setRecentJobs] = useState<JobInfo[]>([]);
+  const [jobsLoaded, setJobsLoaded] = useState(false);
+
+  const loadRecentJobs = async () => {
+    if (jobsLoaded || !projectId) return;
+    try {
+      const res = await jobsApi.list({ project_id: projectId, limit: 5 });
+      setRecentJobs(res.items);
+    } catch { /* ignore */ }
+    setJobsLoaded(true);
+  };
+
+  const toolCards: Record<string, { title: string; desc: string; action: string }> = {
+    research: { title: "用户研究", desc: "生成用户访谈框架和洞察建议", action: "生成研究报告" },
+    stakeholder: { title: "干系人分析", desc: "识别关键角色、影响力和沟通策略", action: "分析干系人" },
+    competitor: { title: "竞品分析", desc: "AI辅助竞品情报收集与差异化定位", action: "分析竞品" },
+    data: { title: "数据分析", desc: "上传CSV或输入指标，生成分析框架", action: "分析数据" },
+    review: { title: "评审材料", desc: "生成技术评审/产品评审的议程和预案", action: "生成材料" },
+    prototype: { title: "原型指导", desc: "基于功能描述生成页面结构和用户流", action: "生成原型" },
+    memory: { title: "语义检索", desc: "在项目知识库中检索相关内容", action: "搜索" },
+  };
+
+  const card = toolCards[toolId] || { title: toolId, desc: "", action: "执行" };
+
   const canRun = !isLoading && !(toolId === "data" && dataMode === "upload" && !dataFile) && !(toolId === "memory" && !(params.query as string)?.trim());
 
   return (
     <div>
-      <p className="text-slate-600 dark:text-slate-400 mb-4">
-        使用此工具辅助产品分析和设计工作。
+      {/* Tool card header */}
+      <div className="mb-4 rounded-xl border border-gray-200 bg-gradient-to-br from-blue-50 to-white p-4 dark:border-gray-700 dark:from-blue-950 dark:to-gray-900">
+        <div className="flex items-center gap-2 mb-1">
+          <span className="text-lg">{toolId === "research" ? "🔍" : toolId === "stakeholder" ? "👥" : toolId === "competitor" ? "⚔️" : toolId === "data" ? "📊" : toolId === "review" ? "✅" : toolId === "prototype" ? "🎨" : "🧠"}</span>
+          <h3 className="font-semibold text-gray-900 dark:text-white">{card.title}</h3>
+        </div>
+        <p className="text-xs text-gray-500 dark:text-gray-400">{card.desc}</p>
+        <button
+          onClick={() => { handleToolAction(); loadRecentJobs(); }}
+          disabled={!canRun}
+          className="mt-3 w-full rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+        >
+          {isLoading ? "执行中..." : card.action}
+        </button>
+      </div>
+
+      <p className="text-slate-600 dark:text-slate-400 mb-4 text-xs">
+        使用此工具辅助产品分析和设计工作。可调整下方参数后执行。
       </p>
 
       {toolId === "research" && (
@@ -505,6 +545,29 @@ export default function ToolPanel({ toolId, projectId, prds }: Props) {
       {result !== null && result !== undefined && toolId !== "memory" && prds.length === 0 && (
         <div className="mt-4 text-sm text-slate-500 dark:text-slate-400">
           该项目暂无 PRD，无法追加结果
+        </div>
+      )}
+
+      {/* Recent jobs for this tool */}
+      {projectId && (
+        <div className="mt-6 border-t border-gray-200 pt-4 dark:border-gray-700">
+          <button onClick={loadRecentJobs} className="mb-2 text-xs font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400">最近任务 ▼</button>
+          {recentJobs.length === 0 ? (
+            <p className="text-xs text-gray-400 dark:text-gray-500">暂无执行记录</p>
+          ) : (
+            <div className="space-y-1.5">
+              {recentJobs.map((j) => {
+                const sc: Record<string, string> = { queued: "text-yellow-600", running: "text-blue-600", succeeded: "text-green-600", failed: "text-red-600" };
+                return (
+                  <div key={j.id} className="rounded border border-gray-100 p-2 text-xs dark:border-gray-800">
+                    <span className={`font-medium ${sc[j.status || ""] || ""}`}>{j.status}</span>
+                    <span className="ml-2 text-gray-500">{j.created_at ? new Date(j.created_at).toLocaleString("zh-CN") : "-"}</span>
+                    {j.error_message && <p className="mt-0.5 text-red-500 truncate">{j.error_message.slice(0, 60)}</p>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
     </div>

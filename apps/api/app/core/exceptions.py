@@ -142,10 +142,13 @@ async def http_exception_handler(request: Request, exc: StarletteHTTPException) 
         500: ErrorCode.INTERNAL_ERROR,
     }
 
+    # Prefer custom code attached to the exception instance
+    code = getattr(exc, "code", None) or code_mapping.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
+
     return JSONResponse(
         status_code=exc.status_code,
         content=ResponseBuilder.error(
-            code=code_mapping.get(exc.status_code, ErrorCode.INTERNAL_ERROR),
+            code=code,
             message=str(exc.detail)
         )
     )

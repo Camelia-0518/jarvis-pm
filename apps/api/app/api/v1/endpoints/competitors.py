@@ -4,14 +4,14 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
 from datetime import datetime
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.security import get_current_user_id
 from app.core.responses import ResponseBuilder
 from app.models.competitor import Competitor
-from app.models.project import Project
+from ._crud_helpers import verify_project_owner, get_owned_resource, list_project_resources, apply_update
 
 router = APIRouter()
 
@@ -60,6 +60,7 @@ class CompetitorResponse(BaseModel):
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("/projects/{project_id}/competitors", response_model=dict)
 async def list_competitors(
     project_id: str,
@@ -67,21 +68,11 @@ async def list_competitors(
     db: AsyncSession = Depends(get_db)
 ):
     """List all competitors for a project"""
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    if not proj_result.scalar_one_or_none():
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
-
-    result = await db.execute(
-        select(Competitor)
-        .where(Competitor.project_id == project_id)
-        .order_by(desc(Competitor.created_at))
-    )
-    competitors = result.scalars().all()
-    return ResponseBuilder.success([CompetitorResponse.model_validate(c) for c in competitors])
+    items, schema = await list_project_resources(db, Competitor, project_id, user_id, CompetitorResponse)
+    return ResponseBuilder.success([schema.model_validate(c) for c in items])
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/projects/{project_id}/competitors", response_model=dict)
 async def create_competitor(
     project_id: str,
@@ -90,30 +81,15 @@ async def create_competitor(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new competitor for a project"""
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    if not proj_result.scalar_one_or_none():
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
-
-    competitor = Competitor(
-        project_id=project_id,
-        created_by=user_id,
-        name=data.name,
-        description=data.description,
-        strengths=data.strengths,
-        weaknesses=data.weaknesses,
-        features=data.features or [],
-        pricing=data.pricing,
-        market_position=data.market_position,
-        source=data.source,
-    )
+    await verify_project_owner(db, project_id, user_id)
+    competitor = Competitor(project_id=project_id, created_by=user_id, **data.model_dump())
     db.add(competitor)
     await db.commit()
     await db.refresh(competitor)
     return ResponseBuilder.success(CompetitorResponse.model_validate(competitor))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/competitors/{competitor_id}", response_model=dict)
 async def get_competitor(
     competitor_id: str,
@@ -121,18 +97,11 @@ async def get_competitor(
     db: AsyncSession = Depends(get_db)
 ):
     """Get a single competitor"""
-    result = await db.execute(
-        select(Competitor)
-        .where(Competitor.id == competitor_id)
-        .join(Project, Competitor.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    competitor = result.scalar_one_or_none()
-    if not competitor:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Competitor not found")
+    competitor = await get_owned_resource(db, Competitor, competitor_id, user_id)
     return ResponseBuilder.success(CompetitorResponse.model_validate(competitor))
 
 
+@rate_limit(requests=30, window=60)
 @router.put("/competitors/{competitor_id}", response_model=dict)
 async def update_competitor(
     competitor_id: str,
@@ -141,24 +110,12 @@ async def update_competitor(
     db: AsyncSession = Depends(get_db)
 ):
     """Update a competitor"""
-    result = await db.execute(
-        select(Competitor)
-        .where(Competitor.id == competitor_id)
-        .join(Project, Competitor.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    competitor = result.scalar_one_or_none()
-    if not competitor:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Competitor not found")
-
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(competitor, field, value)
-
-    await db.commit()
-    await db.refresh(competitor)
+    competitor = await get_owned_resource(db, Competitor, competitor_id, user_id)
+    await apply_update(db, competitor, data)
     return ResponseBuilder.success(CompetitorResponse.model_validate(competitor))
 
 
+@rate_limit(requests=20, window=60)
 @router.delete("/competitors/{competitor_id}", response_model=dict)
 async def delete_competitor(
     competitor_id: str,
@@ -166,16 +123,7 @@ async def delete_competitor(
     db: AsyncSession = Depends(get_db)
 ):
     """Delete a competitor"""
-    result = await db.execute(
-        select(Competitor)
-        .where(Competitor.id == competitor_id)
-        .join(Project, Competitor.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    competitor = result.scalar_one_or_none()
-    if not competitor:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Competitor not found")
-
-    await db.delete(competitor)
+    competitor = await get_owned_resource(db, Competitor, competitor_id, user_id)
+    competitor.soft_delete()
     await db.commit()
     return ResponseBuilder.success({"deleted": True})

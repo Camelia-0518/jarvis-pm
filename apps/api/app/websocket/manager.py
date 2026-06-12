@@ -7,7 +7,7 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 from typing import Dict, List, Optional
 from fastapi import WebSocket
 import json
-import asyncio
+
 from datetime import datetime
 
 logger = logging.getLogger(__name__)

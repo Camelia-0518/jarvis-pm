@@ -53,7 +53,7 @@ async def test_create_requirement_project_not_found(async_client: AsyncClient):
     """POST should return error for non-existent project."""
     payload = {"title": "Orphan requirement"}
     response = await async_client.post("/api/v1/projects/non-existent/requirements", json=payload)
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -119,7 +119,7 @@ async def test_get_requirement_success(async_client: AsyncClient, sample_require
 async def test_get_requirement_not_found(async_client: AsyncClient):
     """GET should return error for non-existent requirement."""
     response = await async_client.get("/api/v1/requirements/non-existent-id")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -153,7 +153,7 @@ async def test_update_requirement_not_found(async_client: AsyncClient):
     """PUT should return error for non-existent requirement."""
     payload = {"title": "Updated"}
     response = await async_client.put("/api/v1/requirements/non-existent-id", json=payload)
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -172,14 +172,16 @@ async def test_delete_requirement_success(async_client: AsyncClient, sample_requ
     assert data["success"] is True
 
     result = await db_session.execute(select(Requirement).where(Requirement.id == sample_requirement.id))
-    assert result.scalar_one_or_none() is None
+    found = result.scalar_one_or_none()
+    assert found is not None
+    assert found.deleted_at is not None
 
 
 @pytest.mark.integration
 async def test_delete_requirement_not_found(async_client: AsyncClient):
     """DELETE should return error for non-existent requirement."""
     response = await async_client.delete("/api/v1/requirements/non-existent-id")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -205,7 +207,7 @@ async def test_get_priority_matrix(async_client: AsyncClient, sample_requirement
 async def test_get_priority_matrix_not_found(async_client: AsyncClient):
     """GET should return error for non-existent project."""
     response = await async_client.get("/api/v1/projects/non-existent/requirements/priority-matrix")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False

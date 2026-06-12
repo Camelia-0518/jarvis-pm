@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 
 from app.core.config import settings
 from app.core.database import init_db, close_db, create_indexes
-from app.core.cache import init_cache, close_cache
+from app.core.cache import init_cache, close_cache, cache_manager
 from app.core.exceptions import register_exception_handlers
-from app.core.logging_config import setup_logging, audit
+from app.core.logging_config import setup_logging
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.rag import retrieval_engine
 from app.rag.knowledge_loader import load_obsidian_documents, ObsidianWatcher
@@ -50,19 +50,30 @@ async def lifespan(app: FastAPI):
 
     # Single-user mode safety warning
     if settings.SINGLE_USER_MODE:
+        if not settings.DEBUG:
+            raise RuntimeError(
+                "[FATAL] SINGLE_USER_MODE=true with DEBUG=false is not allowed. "
+                "Single-user mode bypasses authentication and must never run in production. "
+                "Set SINGLE_USER_MODE=false or DEBUG=true."
+            )
         logging.warning(
             "[SECURITY] SINGLE_USER_MODE is enabled. All requests without "
             "authentication will be treated as 'single-user'. "
             "This should NEVER be used in production (DEBUG=false)."
         )
-        if not settings.DEBUG:
-            logging.error(
-                "[CRITICAL] SINGLE_USER_MODE is enabled with DEBUG=false. "
-                "This is a security risk. Disable SINGLE_USER_MODE for production."
-            )
 
     # Initialize cache
     await init_cache()
+
+    # Warm up cache with design systems and common templates
+    from app.services.prototype_ai_service import PrototypeAIService
+    proto_service = PrototypeAIService()
+    await cache_manager.warm_up([
+        {"key": "design_system:medical", "value": proto_service._get_design_system("medical"), "ttl": 7200},
+        {"key": "design_system:saas", "value": proto_service._get_design_system("saas"), "ttl": 7200},
+        {"key": "design_system:ecommerce", "value": proto_service._get_design_system("ecommerce"), "ttl": 7200},
+        {"key": "design_system:general", "value": proto_service._get_design_system("general"), "ttl": 7200},
+    ])
 
     # Initialize database
     await init_db()
@@ -78,6 +89,22 @@ async def lifespan(app: FastAPI):
         vault_watcher = ObsidianWatcher(retrieval_engine)
         if vault_watcher.start():
             logging.info("Vault watcher started for hot reload")
+
+    # Start task queue for async agent execution
+    from app.agents.tasks import get_task_queue
+    queue = get_task_queue(max_workers=2)
+    await queue.start()
+    logger.info("Task queue started with %d workers", queue.max_workers)
+
+    # Register Job handlers and start Job worker
+    from app.services.job_runner import register_handler, start_worker
+    from app.models.job import JobType
+    from app.api.v1.endpoints.prds import _run_compliance_check_handler
+    from app.api.v1.endpoints.revision_tasks import _run_re_review_handler
+    register_handler(JobType.COMPLIANCE_CHECK, _run_compliance_check_handler)
+    register_handler(JobType.RE_REVIEW, _run_re_review_handler)
+    await start_worker(poll_interval=2.0)
+    logger.info("Job worker started")
 
     logger.info("✅ Application started successfully")
 
@@ -95,14 +122,20 @@ async def lifespan(app: FastAPI):
     # Close database
     await close_db()
 
+    # Stop task queue
+    from app.agents.tasks import get_task_queue
+    queue = get_task_queue()
+    await queue.stop()
+    logger.info("Task queue stopped")
+
     logger.info("✅ Application shutdown complete")
 
 
 # Create FastAPI application
 app = FastAPI(
     title=settings.APP_NAME,
-    description="Jarvis PM - AI-powered Product Management Platform",
-    version="1.0.0",
+    description="Jarvis PM - AI-powered Product & Delivery Management Platform",
+    version="2.0.0",
     docs_url="/docs" if settings.DEBUG else None,
     redoc_url="/redoc" if settings.DEBUG else None,
     openapi_url="/openapi.json" if settings.DEBUG else None,
@@ -152,12 +185,33 @@ async def add_process_time_header(request: Request, call_next):
 async def add_request_id(request: Request, call_next):
     """Add request ID for tracing. Reuses client-provided ID if present."""
     import uuid
+    from app.core.logging_config import set_correlation_id, clear_correlation_id
+
     client_request_id = request.headers.get("X-Request-ID")
     request_id = client_request_id or str(uuid.uuid4())
     request.state.request_id = request_id
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
-    return response
+    set_correlation_id(request_id)
+
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        clear_correlation_id()
+
+
+# Request body size limit middleware
+@app.middleware("http")
+async def check_request_body_size(request: Request, call_next):
+    """Reject requests with body larger than 10MB"""
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 10 * 1024 * 1024:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            status_code=413,
+            content={"detail": "Request body too large (max 10MB)"}
+        )
+    return await call_next(request)
 
 
 # Security headers middleware
@@ -255,7 +309,7 @@ async def root():
     """Root endpoint"""
     return {
         "name": settings.APP_NAME,
-        "version": "1.0.0",
+        "version": "2.0.0",
         "docs": "/docs" if settings.DEBUG else None,
         "health": "/health"
     }

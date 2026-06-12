@@ -153,7 +153,7 @@ async def test_index_memory_document(async_client: AsyncClient):
 async def test_index_memory_document_missing_content(async_client: AsyncClient):
     """POST without content should return error."""
     response = await async_client.post("/api/v1/rag/memory-index/prd/prd-123", json={})
-    assert response.status_code == 200
+    assert response.status_code == 400
     data = response.json()
     assert data["success"] is False
     assert data["error"]["code"] == "INVALID"

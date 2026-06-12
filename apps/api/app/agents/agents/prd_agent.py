@@ -9,6 +9,7 @@ PRD 生成 Agent v2.0
 - 内置医疗等行业合规注入
 """
 
+import asyncio
 import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -21,8 +22,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field, ValidationError
 
 from ..base import BaseAgent, AgentResult, AgentState
-from ..llm_client import create_default_client
-from ..templates import get_template_system, IndustryType
+from ..templates import get_template_system, IndustryType, TemplateSystem
 from ..evaluator import LLMJudge
 
 logger = logging.getLogger(__name__)
@@ -92,17 +92,14 @@ class PRDAgent(BaseAgent):
 
     def __init__(self, llm_client=None, **kwargs):
         """初始化 PRD Agent"""
-        super().__init__(
-            llm_client=llm_client or create_default_client(),
-            **kwargs
-        )
+        super().__init__(llm_client=llm_client, **kwargs)
         self.template_system = get_template_system()
         self._section_cache: Dict[str, str] = {}
         self._evaluator = LLMJudge(llm_client=self.llm_client)
 
-    async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
         """
-        执行 PRD 生成
+        执行 PRD 生成（单一路径：一次请求生成完整内容）
 
         Args:
             input_data: 包含以下字段:
@@ -114,47 +111,53 @@ class PRDAgent(BaseAgent):
                 - sections: 需要生成的章节列表（可选，默认全部）
                 - industry: 行业类型（可选，自动检测）
                 - template_id: 指定模板ID（可选）
+                - skip_evaluation: 是否跳过 AI 质量评估（默认 True，关闭以加快速度）
 
         Returns:
             AgentResult: 包含生成的 PRD（markdown + structured）
         """
-        start_time = datetime.now()
-        self._set_state(AgentState.RUNNING)
+        skip_evaluation = input_data.get("skip_evaluation", True)
 
+        # 步骤1: 解析与标准化输入
+        step1 = self._create_step("parse_input", "解析输入需求")
+        ctx = self._build_context(input_data)
+        self._complete_step(step1, f"解析产品: {ctx['product_name']}, 行业: {ctx['industry']}")
+
+        # 步骤2: 行业检测与模板匹配
+        step2 = self._create_step("detect_industry", "检测行业并匹配模板")
+        template = self._match_template(ctx)
+        ctx["template"] = template
+        self._complete_step(
+            step2,
+            f"匹配模板: {template.name if template else '默认通用模板'}"
+        )
+
+        # 步骤3: 构建增强提示词
+        step3 = self._create_step("build_prompt", "构建增强提示词")
+        prompt = self._build_prompt(ctx)
+        system_prompt = self._build_system_prompt(ctx)
+        self._complete_step(step3, f"提示词长度: {len(prompt)} 字符")
+
+        # 步骤4: 调用 LLM 生成（带超时保护，防止挂死）
+        step4 = self._create_step("generate", "生成 PRD 文档")
         try:
-            # 步骤1: 解析与标准化输入
-            step1 = self._create_step("parse_input", "解析输入需求")
-            ctx = self._build_context(input_data)
-            self._complete_step(step1, f"解析产品: {ctx['product_name']}, 行业: {ctx['industry']}")
-
-            # 步骤2: 行业检测与模板匹配
-            step2 = self._create_step("detect_industry", "检测行业并匹配模板")
-            template = self._match_template(ctx)
-            ctx["template"] = template
-            self._complete_step(
-                step2,
-                f"匹配模板: {template.name if template else '默认通用模板'}"
+            raw_output = await asyncio.wait_for(
+                self._call_llm(prompt=prompt, system_prompt=system_prompt),
+                timeout=120  # 最多等待 120 秒
             )
+        except asyncio.TimeoutError:
+            raise RuntimeError("LLM 生成超时（120秒），请检查网络或稍后重试")
+        self._complete_step(step4, f"原始输出长度: {len(raw_output)} 字符")
 
-            # 步骤3: 构建增强提示词
-            step3 = self._create_step("build_prompt", "构建增强提示词")
-            prompt = self._build_prompt(ctx)
-            system_prompt = self._build_system_prompt(ctx)
-            self._complete_step(step3, f"提示词长度: {len(prompt)} 字符")
+        # 步骤5: 解析与后处理
+        step5 = self._create_step("post_process", "解析结构化数据")
+        structured, markdown = self._parse_output(raw_output, ctx)
+        self._complete_step(step5, f"Markdown {len(markdown)} 字符, 提取 {len(structured.get('sections', []))} 个章节")
 
-            # 步骤4: 调用 LLM 生成
-            step4 = self._create_step("generate", "生成 PRD 文档")
-            raw_output = await self._call_llm(prompt=prompt, system_prompt=system_prompt)
-            self._complete_step(step4, f"原始输出长度: {len(raw_output)} 字符")
-
-            # 步骤5: 解析与后处理
-            step5 = self._create_step("post_process", "解析结构化数据")
-            structured, markdown = self._parse_output(raw_output, ctx)
-            self._complete_step(step5, f"Markdown {len(markdown)} 字符, 提取 {len(structured.get('sections', []))} 个章节")
-
-            # 步骤6: 自动质量评估 (LLM-as-a-Judge)
+        # 步骤6: 自动质量评估（可选，默认跳过以加快速度）
+        eval_result = None
+        if not skip_evaluation:
             step6 = self._create_step("quality_eval", "AI 质量评估")
-            eval_result = None
             try:
                 eval_result = await self._evaluator.evaluate(
                     agent_name=self.name,
@@ -168,49 +171,36 @@ class PRDAgent(BaseAgent):
                 )
                 self._complete_step(
                     step6,
-                    f"综合评分: {eval_result.total_score}/10, "
-                    f"完整性: {eval_result.scores.get('completeness', 0)}, "
-                    f"清晰度: {eval_result.scores.get('clarity', 0)}"
+                    f"综合评分: {eval_result.total_score}/10"
                 )
             except Exception as eval_err:
                 self._complete_step(step6, f"评估跳过: {eval_err}")
 
-            execution_time = (datetime.now() - start_time).total_seconds()
-            self._set_state(AgentState.COMPLETED)
-
-            return AgentResult(
-                success=True,
-                output=markdown,
-                data={
-                    "product_name": ctx["product_name"],
-                    "industry": ctx["industry"],
-                    "template_id": template.id if template else None,
-                    "sections_generated": [s["id"] for s in structured.get("sections", [])],
-                    "content_length": len(markdown),
-                    "structured": structured,
-                    "markdown": markdown,
-                    "user_stories": structured.get("user_stories", []),
-                    "requirements": structured.get("requirements", []),
-                    "compliance_items": structured.get("compliance_items", []),
-                    "evaluation": eval_result.to_dict() if eval_result else None,
-                },
-                execution_time=execution_time,
-                metadata={
-                    "agent_name": self.name,
-                    "version": self.version,
-                    "steps_completed": len(self.steps),
-                    "template_used": template.id if template else None,
-                    "evaluated": eval_result is not None,
-                }
-            )
-
-        except Exception as e:
-            self._set_state(AgentState.FAILED)
-            return AgentResult(
-                success=False,
-                error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
-            )
+        return AgentResult(
+            success=True,
+            output=markdown,
+            data={
+                "product_name": ctx["product_name"],
+                "industry": ctx["industry"],
+                "template_id": template.id if template else None,
+                "sections_generated": [s["id"] for s in structured.get("sections", [])],
+                "content_length": len(markdown),
+                "structured": structured,
+                "markdown": markdown,
+                "user_stories": structured.get("user_stories", []),
+                "requirements": structured.get("requirements", []),
+                "compliance_items": structured.get("compliance_items", []),
+                "evaluation": eval_result.to_dict() if eval_result else None,
+            },
+            execution_time=self.elapsed_seconds,
+            metadata={
+                "agent_name": self.name,
+                "version": self.version,
+                "steps_completed": len(self.steps),
+                "template_used": template.id if template else None,
+                "evaluated": eval_result is not None,
+            }
+        )
 
     async def generate_section(
         self,
@@ -242,6 +232,19 @@ class PRDAgent(BaseAgent):
         existing_prd = context.get("existing_prd", "")
         existing_md = existing_prd if isinstance(existing_prd, str) else existing_prd.get("markdown", "")
 
+        # 大纲优先模式：注入大纲要点
+        outline_hint = ""
+        outline = context.get("outline")
+        if outline:
+            section_outline = next(
+                (s for s in outline.get("sections", []) if s.get("id") == section_id),
+                None
+            )
+            if section_outline and section_outline.get("key_points"):
+                outline_hint = "\n## 大纲要点（必须覆盖）\n"
+                for kp in section_outline["key_points"]:
+                    outline_hint += f"- {kp}\n"
+
         prompt = f"""请为以下产品生成 PRD 的「{section_meta['name']}」章节。
 
 ## 产品信息
@@ -253,6 +256,7 @@ class PRDAgent(BaseAgent):
 
 ## 已有 PRD 上下文（供参考，保持风格一致）
 {existing_md[:2000] if existing_md else '（尚无其他章节）'}
+{outline_hint}
 
 ## 输出要求
 1. 只输出该章节的 Markdown 内容
@@ -340,6 +344,9 @@ class PRDAgent(BaseAgent):
         if template and "prd_generator" in template.agent_prompts:
             parts.append(f"\n=== 行业特定要求 ===\n{template.agent_prompts['prd_generator']}")
 
+        # 注入 PRD 通用输出规范
+        parts.append(f"\n=== PRD 通用输出规范 ===\n{TemplateSystem.DEFAULT_PRD_GUIDELINES}")
+
         return "\n".join(parts)
 
     def _build_prompt(self, ctx: Dict[str, Any]) -> str:
@@ -384,36 +391,60 @@ class PRDAgent(BaseAgent):
 {chr(10).join(section_names)}
 {compliance_fusion}
 
-## 输出格式
-请直接输出 Markdown 格式的 PRD 文档，使用以下结构：
+## 输出格式要求（必须严格遵守）
+
+请直接输出 Markdown 格式的 PRD 文档。以下格式要求具有最高优先级，必须严格执行：
+
+### 章节编号规则
+- 文档主标题：`# 产品名称`（不带编号）
+- 一级章节标题：`## N. 标题`（例如：`## 1. 背景与目标`）
+- 二级章节标题：`### N.N 标题`（例如：`### 1.1 市场背景`）
+- 三级章节标题：`#### N.N.N 标题`（例如：`#### 1.1.1 子模块`）
+- **绝对禁止**出现 `## 1. 1. 背景与目标`、`### 2. 2. 用户故事` 这种数字重复格式
+- 章节标题中禁止出现双重编号，每个标题只应有一个章节号
+
+### 必须包含的内容元素
+1. **MVP 边界**：每个功能点必须明确标注「一期」或「二期」
+2. **状态机**：必须包含 Mermaid 状态转换图（`stateDiagram-v2` 或 `graph TD`）和 Markdown 状态转换表
+3. **流程图**：核心业务流程必须使用 Mermaid/PlantUML 泳道图，禁止纯文本描述
+4. **信息架构(IA)**：功能规格章节必须包含信息架构图（树状结构）和核心页面字段清单（Markdown 表格）
+5. **验收标准**：每个用户故事必须使用 Given-When-Then 格式
+6. **对账规则**（如涉及支付/财务）：必须明确长款/短款/单边账的处理规则
+
+### 章节结构示例（仅供参考，必须按实际内容填充）
 
 # {ctx['product_name']} 产品需求文档
 
 ## 1. 背景与目标
-- 要点...
+### 1.1 市场环境
+### 1.2 业务目标（标注一期/二期）
 
 ## 2. 用户故事
-- US-001: 作为[角色]，我想要[需求]，以便[价值]
-  - 验收标准: ...
+### 2.1 角色画像
+### 2.2 用户故事与验收标准（Given-When-Then 格式）
 
 ## 3. 业务流程
-- 主流程: ...
-- 异常流程: ...
+### 3.1 核心流程（附 Mermaid 泳道图）
+### 3.2 异常流程
 
 ## 4. 功能规格
-- FR-001: ...
+### 4.1 信息架构图(IA)
+### 4.2 核心页面字段清单（表格）
+### 4.3 功能模块详述（标注一期/二期）
 
-## 5. 数据需求
-- ...
+## 5. 数据架构
+### 5.1 状态机定义（附 Mermaid 图 + 转换表）
+### 5.2 数据模型
 
-## 6. 合规要求（如适用）
-- ...
+## 6. 合规要求
 
 ## 7. 数据埋点
-- ...
 
-## 8. 里程碑
-- 第一阶段: ...
+## 8. 供应链与促销策略（如适用）
+
+## 9. 里程碑
+### 9.1 一期里程碑
+### 9.2 二期里程碑
 """
         return prompt
 

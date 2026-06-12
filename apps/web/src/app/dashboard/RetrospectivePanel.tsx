@@ -1,10 +1,10 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { toast } from "sonner";
 import { useProjectStore } from "@/stores/projectStore";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+import { retrospectiveApi } from "@/lib/api";
 
 export default function RetrospectivePanel() {
   const { projects } = useProjectStore();
@@ -30,29 +30,20 @@ export default function RetrospectivePanel() {
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/retrospectives`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          project_id: projects[0].id,
-          title,
-          what_went_well: whatWentWell,
-          what_went_wrong: whatWentWrong,
-          surprises,
-          planned_days: plannedDays,
-          actual_days: actualDays,
-        }),
+      const created = await retrospectiveApi.create({
+        project_id: projects[0].id,
+        title,
+        lessons: [
+          { id: "went-well", category: "well", lesson: whatWentWell, action_item: "" },
+          { id: "went-wrong", category: "wrong", lesson: whatWentWrong, action_item: "" },
+          { id: "surprises", category: "surprise", lesson: surprises, action_item: "" },
+        ],
       });
-      const resData = await res.json();
 
       toast.success("复盘记录已创建");
       // Auto-run AI analysis
-      const aiRes = await fetch(`${API_BASE}/retrospectives/${resData.data.id}/ai-analyze`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-      });
-      const aiData = await aiRes.json();
-      setAiResult(aiData.data?.summary || "分析完成");
+      const aiData = await retrospectiveApi.aiAnalyze(created.id);
+      setAiResult((aiData.data as Record<string, string>)?.summary || "分析完成");
 
       setTitle("");
       setWhatWentWell("");
@@ -83,10 +74,18 @@ export default function RetrospectivePanel() {
       </div>
 
       {!showForm && aiResult && (
-        <div className="prose prose-sm dark:prose-invert max-w-none">
-          <div className="whitespace-pre-wrap text-sm text-slate-600 dark:text-slate-300">
-            {aiResult}
+        <div>
+          <div className="prose prose-sm dark:prose-invert max-w-none">
+            <div className="whitespace-pre-wrap text-sm text-slate-600 dark:text-slate-300">
+              {aiResult}
+            </div>
           </div>
+          <Link
+            href="/assets"
+            className="mt-3 inline-block text-sm text-sky-600 hover:text-sky-700 dark:text-sky-400"
+          >
+            沉淀经验到资产中心 →
+          </Link>
         </div>
       )}
 

@@ -2,9 +2,9 @@
 
 from typing import Any, Optional, List, TypeVar, Generic
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import Response
-import json
+
 
 T = TypeVar('T')
 
@@ -57,7 +57,7 @@ class ResponseBuilder:
     ) -> dict:
         """Build success response"""
         response_meta = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **(meta or {})
         }
         if message:
@@ -93,7 +93,7 @@ class ResponseBuilder:
             "data": None,
             "error": error_detail,
             "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "status_code": status_code
             }
         }
@@ -116,7 +116,7 @@ class ResponseBuilder:
             "total_pages": total_pages,
             "has_next": page < total_pages,
             "has_prev": page > 1,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             **(extra_meta or {})
         }
 
@@ -140,7 +140,7 @@ class ResponseBuilder:
             "data": data,
             "error": None,
             "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "message": message,
                 "status_code": 201
             }
@@ -154,7 +154,7 @@ class ResponseBuilder:
             "data": None,
             "error": None,
             "meta": {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "message": message,
                 "status_code": 204
             }

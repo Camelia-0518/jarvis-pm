@@ -1,23 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { methodologyApi, type MethodologyTemplate } from "@/lib/api";
+import { methodologyApi, retrospectiveApi, type MethodologyTemplate, type RetroLessons } from "@/lib/api";
+import { devError } from "@/utils/logger";
 import { toast } from "sonner";
-
-interface RetroLessons {
-  id: string;
-  project_id: string;
-  title: string;
-  lessons: Array<{
-    id: string;
-    category: string;
-    lesson: string;
-    action_item: string;
-    impact: string;
-    owner: string;
-  }>;
-  ai_analysis: string;
-}
 
 const STAGE_GATE_SEED = {
   name: "医疗信息化交付方法论",
@@ -108,17 +94,15 @@ export default function MethodologyPanel() {
         const items = res?.items || [];
         setMethodologies(items);
       })
-      .catch(() => {})
+      .catch((err: unknown) => { devError("Failed to load methodologies", err); })
       .finally(() => setLoading(false));
 
     // Fetch retrospective lessons for methodology aggregation
-    fetch("/api/v1/retrospectives?limit=20")
-      .then((r) => r.json())
-      .then((data) => {
-        const items = data?.data || data?.items || [];
+    retrospectiveApi.list({ limit: 20 })
+      .then(({ items = [] }) => {
         setRetroLessons(items.filter((r: RetroLessons) => r.lessons?.length > 0));
       })
-      .catch(() => {});
+      .catch((err: unknown) => { devError("Failed to load retrospectives", err); });
   }, []);
 
   const handleSeed = async () => {
@@ -204,7 +188,7 @@ export default function MethodologyPanel() {
         <div className="text-center py-8 text-slate-400">
           <div className="text-3xl mb-2">📋</div>
           <p className="text-sm">暂无交付方法论模板</p>
-          <p className="text-xs mt-1">点击"初始化模板"创建 Stage-Gate 标准交付路径</p>
+          <p className="text-xs mt-1">点击&ldquo;初始化模板&rdquo;创建 Stage-Gate 标准交付路径</p>
         </div>
       ) : (
         <div className="space-y-4">

@@ -9,9 +9,9 @@ Web 搜索工具
 import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-import json
-import urllib.parse
-from typing import Dict, Any, List
+
+
+
 
 from .base import BaseTool, ToolParameter, ToolResult, ParameterType
 

@@ -6,6 +6,7 @@ import uuid
 import enum
 
 from app.core.database import Base
+from app.models.mixins import SoftDeleteMixin, TimestampMixin
 
 
 class AnnotationStatus(str, enum.Enum):
@@ -21,11 +22,10 @@ class AnnotationType(str, enum.Enum):
     ISSUE = "issue"
 
 
-class PRDAnnotation(Base):
+class PRDAnnotation(Base, SoftDeleteMixin, TimestampMixin):
     """PRD review annotation / inline comment"""
     __tablename__ = "prd_annotations"
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     prd_id = Column(String, ForeignKey("prds.id"), nullable=False)
     parent_id = Column(String, ForeignKey("prd_annotations.id"), nullable=True)  # reply to
 
@@ -40,9 +40,10 @@ class PRDAnnotation(Base):
     annotation_type = Column(Enum(AnnotationType), default=AnnotationType.COMMENT)
     status = Column(Enum(AnnotationStatus), default=AnnotationStatus.OPEN)
 
+    # 关联修改任务（闭环改造）
+    revision_task_id = Column(String, ForeignKey("prd_revision_tasks.id"), nullable=True, index=True)
+
     # Metadata
     created_by = Column(String, ForeignKey("users.id"), nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     resolved_at = Column(DateTime(timezone=True), nullable=True)
     resolved_by = Column(String, ForeignKey("users.id"), nullable=True)

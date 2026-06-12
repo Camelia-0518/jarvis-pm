@@ -17,7 +17,7 @@ const WorkflowCanvas = dynamic(
 const TEMPLATE_TO_WORKFLOW: Record<string, string> = {
   'from-scratch': 'product-design',
   'security-review': 'medical-compliance-audit',
-  'prd-review': 'product-design',
+  'prd-review': 'medical-product-review',
 };
 
 export default function WorkflowPage() {
@@ -390,7 +390,7 @@ export default function WorkflowPage() {
                 {(['logs', 'messages', 'conflicts'] as const).map((tab) => (
                   <button
                     key={tab}
-                    onClick={() => setActiveTab(tab as any)}
+                    onClick={() => setActiveTab(tab)}
                     className={`flex-1 py-2 text-sm font-medium ${
                       activeTab === tab
                         ? 'text-sky-600 border-b-2 border-sky-600'
@@ -442,7 +442,7 @@ export default function WorkflowPage() {
                             </span>
                           </div>
                           <div className="mt-1 text-xs text-slate-500 italic">
-                            "{log.reasoning}"
+                            {"“"}{log.reasoning}{"”"}
                           </div>
                         </div>
                       ))

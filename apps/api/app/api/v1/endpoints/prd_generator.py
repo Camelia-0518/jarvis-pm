@@ -4,12 +4,16 @@ PRD Generator API Endpoints
 提供PRD生成的REST API接口
 """
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+import logging
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
 
 from app.services.prd_generator import prd_generator_service
+from app.core.rate_limit import rate_limit
 from app.core.responses import ResponseBuilder
+from app.core.exceptions import AppException
+from app.core.security import get_current_user_id
 
 router = APIRouter()
 
@@ -62,8 +66,9 @@ class TemplateInfo(BaseModel):
     keywords: List[str]
 
 
+@rate_limit(requests=10, window=60)
 @router.post("/generate", response_model=PRDGenerateResponse)
-async def generate_prd(request: PRDGenerateRequest):
+async def generate_prd(request: PRDGenerateRequest, user_id: str = Depends(get_current_user_id)):
     """
     生成PRD文档
 
@@ -97,12 +102,14 @@ async def generate_prd(request: PRDGenerateRequest):
             execution_time=result["execution_time"]
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"生成PRD失败: {str(e)}")
+    except Exception:
+        logging.exception("PRD generation failed")
+        raise HTTPException(status_code=500, detail="生成PRD失败，请稍后重试")
 
 
+@rate_limit(requests=10, window=60)
 @router.post("/export", response_model=PRDExportResponse)
-async def export_prd(request: PRDExportRequest):
+async def export_prd(request: PRDExportRequest, user_id: str = Depends(get_current_user_id)):
     """
     导出PRD到不同格式
 
@@ -131,12 +138,14 @@ async def export_prd(request: PRDExportRequest):
             format=result["format"]
         )
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"导出PRD失败: {str(e)}")
+    except Exception:
+        logging.exception("PRD export failed")
+        raise HTTPException(status_code=500, detail="导出PRD失败，请稍后重试")
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/templates", response_model=List[TemplateInfo])
-async def list_templates(industry: Optional[str] = None):
+async def list_templates(industry: Optional[str] = None, user_id: str = Depends(get_current_user_id)):
     """
     获取可用的PRD模板列表
     """
@@ -157,8 +166,9 @@ async def list_templates(industry: Optional[str] = None):
     return [TemplateInfo(**t) for t in templates]
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/templates/{template_id}")
-async def get_template_detail(template_id: str):
+async def get_template_detail(template_id: str, user_id: str = Depends(get_current_user_id)):
     """
     获取模板详细信息
     """
@@ -190,8 +200,9 @@ async def get_template_detail(template_id: str):
     }
 
 
+@rate_limit(requests=10, window=60)
 @router.post("/quick-generate")
-async def quick_generate(description: str, product_name: Optional[str] = None):
+async def quick_generate(description: str, product_name: Optional[str] = None, user_id: str = Depends(get_current_user_id)):
     """
     快速生成PRD（简化接口）
 
@@ -211,9 +222,10 @@ async def quick_generate(description: str, product_name: Optional[str] = None):
         )
 
         if not result["success"]:
-            return ResponseBuilder.error(
+            raise AppException(
+                result.get("error", "生成失败"),
                 code="PRD_GENERATION_FAILED",
-                message=result.get("error", "生成失败")
+                status_code=500,
             )
 
         return ResponseBuilder.success({
@@ -224,5 +236,6 @@ async def quick_generate(description: str, product_name: Optional[str] = None):
             "execution_time": result["execution_time"]
         })
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"生成PRD失败: {str(e)}")
+    except Exception:
+        logging.exception("Quick PRD generation failed")
+        raise HTTPException(status_code=500, detail="生成PRD失败，请稍后重试")

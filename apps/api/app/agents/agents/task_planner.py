@@ -12,13 +12,11 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 import json
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 
-from ..templates import TemplateSystem, IndustryType, get_template_system, IndustryTemplate
+from ..templates import TemplateSystem, IndustryType, get_template_system
 
 from ..base import BaseAgent, AgentResult, AgentState
-from ..llm_client import create_default_client
-from ..templates import TemplateSystem, IndustryType, get_template_system
 
 
 @dataclass
@@ -114,13 +112,10 @@ class TaskPlanner(BaseAgent):
 }"""
 
     def __init__(self, llm_client=None, **kwargs):
-        super().__init__(
-            llm_client=llm_client or create_default_client(),
-            **kwargs
-        )
+        super().__init__(llm_client=llm_client, **kwargs)
         self.template_system = get_template_system()
 
-    async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
         """
         执行任务规划
 
@@ -130,88 +125,73 @@ class TaskPlanner(BaseAgent):
         Returns:
             AgentResult: 包含任务计划
         """
-        start_time = datetime.now()
-        self._set_state(AgentState.RUNNING)
+        intent_result = input_data.get("intent_result", {})
+        user_input = input_data.get("user_input", "")
+        context = input_data.get("context", {})
 
-        try:
-            intent_result = input_data.get("intent_result", {})
-            user_input = input_data.get("user_input", "")
-            context = input_data.get("context", {})
+        # 步骤1: 选择工作流模板
+        step1 = self._create_step("select_template", "选择工作流模板")
+        workflow_type = self._select_workflow(intent_result)
+        self._complete_step(step1, f"选择模板: {workflow_type}")
 
-            # 步骤1: 选择工作流模板
-            step1 = self._create_step("select_template", "选择工作流模板")
-            workflow_type = self._select_workflow(intent_result)
-            self._complete_step(step1, f"选择模板: {workflow_type}")
+        # 步骤2: 检测行业并匹配模板
+        step2 = self._create_step("detect_industry", "检测行业类型")
+        industry = self.template_system.detect_industry(user_input)
+        template = self.template_system.match_template(user_input, industry)
+        self._complete_step(step2, f"检测到行业: {industry.value}, 模板: {template.name if template else '无'}")
 
-            # 步骤2: 检测行业并匹配模板
-            step2 = self._create_step("detect_industry", "检测行业类型")
-            industry = self.template_system.detect_industry(user_input)
-            template = self.template_system.match_template(user_input, industry)
-            self._complete_step(step2, f"检测到行业: {industry.value}, 模板: {template.name if template else '无'}")
+        # 步骤3: 生成详细计划
+        step3 = self._create_step("generate_plan", "生成详细计划")
+        plan = await self._generate_plan(
+            workflow_type=workflow_type,
+            intent_result=intent_result,
+            user_input=user_input,
+            context=context,
+            template=template
+        )
+        self._complete_step(step3, f"生成 {len(plan['steps'])} 个步骤")
 
-            # 步骤3: 生成详细计划
-            step3 = self._create_step("generate_plan", "生成详细计划")
-            plan = await self._generate_plan(
-                workflow_type=workflow_type,
-                intent_result=intent_result,
-                user_input=user_input,
-                context=context,
-                template=template
-            )
-            self._complete_step(step3, f"生成 {len(plan['steps'])} 个步骤")
+        # 步骤4: 应用模板增强（如果有）
+        step4 = self._create_step("apply_template", "应用行业模板")
+        if template:
+            plan = self.template_system.apply_template_to_plan(template, plan)
+            self._complete_step(step4, f"应用模板: {template.name}")
+        else:
+            self._complete_step(step4, "无匹配模板")
 
-            # 步骤4: 应用模板增强（如果有）
-            step4 = self._create_step("apply_template", "应用行业模板")
-            if template:
-                plan = self.template_system.apply_template_to_plan(template, plan)
-                self._complete_step(step4, f"应用模板: {template.name}")
-            else:
-                self._complete_step(step4, "无匹配模板")
+        # 步骤5: 验证计划
+        step5 = self._create_step("validate_plan", "验证计划")
+        validation = self._validate_plan(plan)
+        self._complete_step(step5, f"验证结果: {validation['status']}")
 
-            # 步骤5: 验证计划
-            step5 = self._create_step("validate_plan", "验证计划")
-            validation = self._validate_plan(plan)
-            self._complete_step(step5, f"验证结果: {validation['status']}")
+        # 构建返回数据
+        result_data = {
+            "workflow_type": workflow_type,
+            "plan": plan,
+            "validation": validation,
+            "industry": industry.value
+        }
 
-            execution_time = (datetime.now() - start_time).total_seconds()
-            self._set_state(AgentState.COMPLETED)
-
-            # 构建返回数据
-            result_data = {
-                "workflow_type": workflow_type,
-                "plan": plan,
-                "validation": validation,
-                "industry": industry.value
+        # 如果有模板，添加模板信息
+        if template:
+            result_data["template"] = {
+                "id": template.id,
+                "name": template.name,
+                "industry": template.industry.value
             }
 
-            # 如果有模板，添加模板信息
-            if template:
-                result_data["template"] = {
-                    "id": template.id,
-                    "name": template.name,
-                    "industry": template.industry.value
-                }
-
-            return AgentResult(
-                success=True,
-                output=f"生成任务计划: {plan['workflow_name']}，共 {len(plan['steps'])} 个步骤",
-                data=result_data,
-                execution_time=execution_time,
-                metadata={
-                    "agent_name": self.name,
-                    "total_estimated_time": plan.get("estimated_total_time", 0),
-                    "industry": industry.value,
-                    "template_id": template.id if template else None
-                }
-            )
-
-        except Exception as e:
-            self._set_state(AgentState.FAILED)
-            return AgentResult(
-                success=False,
-                error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
-            )
+        return AgentResult(
+            success=True,
+            output=f"生成任务计划: {plan['workflow_name']}，共 {len(plan['steps'])} 个步骤",
+            data=result_data,
+            execution_time=self.elapsed_seconds,
+            metadata={
+                "agent_name": self.name,
+                "total_estimated_time": plan.get("estimated_total_time", 0),
+                "industry": industry.value,
+                "template_id": template.id if template else None
+            }
+        )
 
     def _select_workflow(self, intent_result: Dict[str, Any]) -> str:
         """根据意图选择工作流模板"""

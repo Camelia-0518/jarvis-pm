@@ -319,7 +319,7 @@ export default function MedicalComplianceChecker() {
         ].map(tab => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
+            onClick={() => setActiveTab(tab.id as "checklist" | "multisite" | "regulations")}
             className={`flex items-center gap-1 px-4 py-2 text-sm font-medium ${
               activeTab === tab.id
                 ? "border-b-2 border-sky-500 text-sky-600"

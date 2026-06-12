@@ -11,7 +11,7 @@ os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 from pathlib import Path
 from typing import Dict, Any, List
-import re
+
 
 from .base import BaseTool, ToolParameter, ToolResult, ParameterType
 

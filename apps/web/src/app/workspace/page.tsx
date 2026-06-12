@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useProjectStore } from "@/stores/projectStore";
 import { prdApi, projectApi, workflowApi, type PRDSummary, type ProjectHealthItem } from "@/lib/api";
 import NavHeader from "@/components/global/NavHeader";
+import { devError } from "@/utils/logger";
 import { toast } from "sonner";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import PersonaPanel from "./PersonaPanel";
@@ -38,15 +39,15 @@ function WorkspaceContent() {
   useEffect(() => {
     if (projectId) {
       fetchProject(projectId);
-      prdApi.list({ projectId }).then((res) => setProjectPRDs(res?.items || [])).catch(() => setProjectPRDs([]));
-      projectApi.healthDetail(projectId).then(setProjectHealth).catch(() => setProjectHealth(null));
+      prdApi.list({ projectId }).then((res) => setProjectPRDs(res?.items || [])).catch((err: unknown) => { devError("Failed to load project PRDs", err); setProjectPRDs([]); });
+      projectApi.healthDetail(projectId).then(setProjectHealth).catch((err: unknown) => { devError("Failed to load project health", err); setProjectHealth(null); });
     }
   }, [projectId, fetchProject]);
 
   const handlePRDCreated = (prdId: string) => {
     setShowPRDWizard(false);
     if (projectId) {
-      prdApi.list({ projectId }).then((res) => setProjectPRDs(res?.items || [])).catch(() => {});
+      prdApi.list({ projectId }).then((res) => setProjectPRDs(res?.items || [])).catch((err: unknown) => { devError("Failed to refresh PRDs", err); });
     }
     router.push(`/prd/${prdId}`);
   };
@@ -68,7 +69,7 @@ function WorkspaceContent() {
 
   const refreshHealth = () => {
     if (projectId) {
-      projectApi.healthDetail(projectId).then(setProjectHealth).catch(() => {});
+      projectApi.healthDetail(projectId).then(setProjectHealth).catch((err: unknown) => { devError("Failed to refresh health", err); });
     }
   };
 
@@ -110,7 +111,7 @@ function WorkspaceContent() {
             const doRefresh = async (retries: number) => {
               await new Promise(r => setTimeout(r, 1500));
               await refreshHealth();
-              await prdApi.list({ projectId }).then((r) => setProjectPRDs(r?.items || [])).catch(() => {});
+              await prdApi.list({ projectId }).then((r) => setProjectPRDs(r?.items || [])).catch((err: unknown) => { devError("Failed to refresh PRDs after workflow", err); });
               // Double-check health after another delay
               if (retries > 0) {
                 setTimeout(() => { refreshHealth(); }, 2000);
@@ -414,6 +415,16 @@ function WorkspaceContent() {
                   <span className="text-slate-600 dark:text-slate-400">状态</span>
                   <span className="font-medium">{currentProject?.status || "active"}</span>
                 </div>
+                {currentProject?.created_by && (
+                  <div className="flex justify-between">
+                    <span className="text-slate-600 dark:text-slate-400">创建者</span>
+                    <span className="font-medium text-xs truncate max-w-[120px]" title={currentProject.created_by}>{currentProject.created_by}</span>
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span className="text-slate-600 dark:text-slate-400">可见范围</span>
+                  <span className="text-xs text-slate-500">{currentProject?.workspace_id ? "工作区成员" : "仅自己"}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -452,7 +463,7 @@ function WorkspaceContent() {
                     <div className="text-center py-12">
                       <div className="text-4xl mb-4">📝</div>
                       <div className="text-slate-600 dark:text-slate-300">暂无 PRD 文档</div>
-                      <div className="text-sm text-slate-400 mt-2">点击"+ 新建 PRD"创建第一份文档</div>
+                      <div className="text-sm text-slate-400 mt-2">点击&ldquo;+ 新建 PRD&rdquo;创建第一份文档</div>
                     </div>
                   ) : (
                     <div className="space-y-3">

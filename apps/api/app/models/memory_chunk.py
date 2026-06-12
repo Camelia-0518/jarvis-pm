@@ -1,6 +1,6 @@
 """Memory chunk model for semantic search"""
 
-from sqlalchemy import Column, String, DateTime, Text, Integer, ForeignKey, Index
+from sqlalchemy import Column, String, DateTime, Text, Integer, Index
 from sqlalchemy.sql import func
 import uuid
 

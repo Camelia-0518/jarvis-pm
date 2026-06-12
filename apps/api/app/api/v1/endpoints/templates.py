@@ -8,10 +8,13 @@ from sqlalchemy import select, desc, func
 from datetime import datetime
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.security import get_current_user_id
-from app.core.responses import ResponseBuilder, ErrorCode
+from app.core.responses import ResponseBuilder
 from app.core.exceptions import ResourceNotFoundError, ResourceConflictError
+from app.core.permissions import require_resource_owner
 from app.models.template import Template
+from app.models.audit_log import AuditLog
 
 router = APIRouter()
 
@@ -58,36 +61,36 @@ BUILTIN_TEMPLATES = [
     {
         "id": "tpl-default",
         "name": "默认模板",
-        "description": "标准 8 章 PRD 结构，适用于大多数产品场景",
+        "description": "标准 PRD 结构，适用于大多数产品场景。增强要求：用户故事含Given-When-Then验收标准，功能需求含状态机定义，UI/UX含信息架构图+核心页面字段清单",
         "industry": "other",
-        "chapters": ["产品概述", "背景与目标", "用户故事", "功能需求", "非功能需求", "数据模型", "UI/UX 设计", "发布计划"],
+        "chapters": ["产品概述", "背景与目标", "用户故事", "验收标准", "功能需求", "状态机定义", "非功能需求", "数据模型", "UI/UX 设计", "发布计划"],
         "icon": "📄",
         "color": "bg-slate-500",
     },
     {
         "id": "tpl-medical",
         "name": "医疗行业模板",
-        "description": "针对医疗信息化产品，内置合规检查与多院区适配",
+        "description": "针对医疗信息化产品，内置合规检查与多院区适配。增强要求：含竞品/现有系统关系分析（朗珈/滨浦/安必平替代或互补定位），核心流程用Mermaid泳道图，功能需求含状态机与MVP边界，数据安全明确WORM存储+数字签名（禁用区块链），等保引用标注版本号如GB/T 22239-2019",
         "industry": "medical",
-        "chapters": ["产品概述", "政策与合规", "用户角色", "核心流程", "功能需求", "数据安全", "系统集成", "上线计划"],
+        "chapters": ["产品概述", "政策与合规", "竞品/替代方案分析", "用户角色", "核心流程", "功能需求", "状态机与MVP边界", "数据安全", "系统集成", "上线计划"],
         "icon": "🏥",
         "color": "bg-emerald-500",
     },
     {
         "id": "tpl-saas",
         "name": "SaaS 产品模板",
-        "description": "面向 B2B SaaS，强调订阅模式、权限管理与集成能力",
+        "description": "面向 B2B SaaS，强调订阅模式、权限管理与集成能力。增强要求：核心功能含状态机定义，定价策略含计费规则表，技术架构含多租户隔离策略具体说明",
         "industry": "saas",
-        "chapters": ["产品概述", "价值主张", "用户画像", "核心功能", "定价策略", "技术架构", "集成方案", "GTM 计划"],
+        "chapters": ["产品概述", "价值主张", "用户画像", "核心功能", "状态机定义", "定价策略", "计费规则表", "技术架构", "集成方案", "GTM 计划"],
         "icon": "☁️",
         "color": "bg-sky-500",
     },
     {
         "id": "tpl-ecommerce",
         "name": "电商产品模板",
-        "description": "专注交易链路、商品管理与营销转化",
+        "description": "专注交易链路、商品管理与营销转化。增强要求：交易链路含订单状态机，支付与风控含对账差异处理规则（长款/短款/单边账），库存管理含库存状态流转",
         "industry": "ecommerce",
-        "chapters": ["产品概述", "商业模式", "用户旅程", "交易链路", "营销工具", "库存管理", "支付与风控", "运营计划"],
+        "chapters": ["产品概述", "商业模式", "用户旅程", "交易链路", "订单状态机", "营销工具", "库存管理", "库存状态流转", "支付与风控", "对账差异处理", "运营计划"],
         "icon": "🛒",
         "color": "bg-orange-500",
     },
@@ -117,6 +120,7 @@ async def seed_builtin_templates(db: AsyncSession):
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("", response_model=dict)
 async def list_templates(
     user_id: str = Depends(get_current_user_id),
@@ -126,7 +130,7 @@ async def list_templates(
     industry: Optional[str] = Query(None, description="Filter by industry"),
 ):
     """List all templates (builtin + user-created) with pagination"""
-    query = select(Template)
+    query = select(Template).where(Template.deleted_at.is_(None))
 
     if industry:
         query = query.where(Template.industry == industry)
@@ -163,6 +167,7 @@ async def list_templates(
     return ResponseBuilder.paginated(data=template_list, page=page, limit=limit, total=total)
 
 
+@rate_limit(requests=30, window=60)
 @router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_template(
     template: TemplateCreate,
@@ -175,6 +180,7 @@ async def create_template(
         select(Template).where(
             func.lower(Template.name) == func.lower(template.name),
             Template.created_by == user_id,
+            Template.deleted_at.is_(None),
         )
     )
     if existing.scalar_one_or_none():
@@ -197,6 +203,12 @@ async def create_template(
     await db.commit()
     await db.refresh(new_template)
 
+    db.add(AuditLog(
+        user_id=user_id, action="create", resource_type="template",
+        resource_id=new_template.id, summary=f"创建了模板 {new_template.name}",
+    ))
+    await db.commit()
+
     return ResponseBuilder.created(
         {
             "id": new_template.id,
@@ -213,6 +225,7 @@ async def create_template(
     )
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/{template_id}", response_model=dict)
 async def get_template(
     template_id: str,
@@ -220,7 +233,7 @@ async def get_template(
     db: AsyncSession = Depends(get_db),
 ):
     """Get template details"""
-    result = await db.execute(select(Template).where(Template.id == template_id))
+    result = await db.execute(select(Template).where(Template.id == template_id, Template.deleted_at.is_(None)))
     tmpl = result.scalar_one_or_none()
 
     if not tmpl:
@@ -249,6 +262,7 @@ async def get_template(
     )
 
 
+@rate_limit(requests=30, window=60)
 @router.put("/{template_id}", response_model=dict)
 async def update_template(
     template_id: str,
@@ -257,7 +271,7 @@ async def update_template(
     db: AsyncSession = Depends(get_db),
 ):
     """Update a template (builtin templates cannot be modified)"""
-    result = await db.execute(select(Template).where(Template.id == template_id))
+    result = await db.execute(select(Template).where(Template.id == template_id, Template.deleted_at.is_(None)))
     tmpl = result.scalar_one_or_none()
 
     if not tmpl:
@@ -282,6 +296,7 @@ async def update_template(
                 func.lower(Template.name) == func.lower(template_update.name),
                 Template.created_by == user_id,
                 Template.id != template_id,
+                Template.deleted_at.is_(None),
             )
         )
         if existing.scalar_one_or_none():
@@ -320,6 +335,7 @@ async def update_template(
     )
 
 
+@rate_limit(requests=20, window=60)
 @router.delete("/{template_id}", response_model=dict)
 async def delete_template(
     template_id: str,
@@ -327,7 +343,7 @@ async def delete_template(
     db: AsyncSession = Depends(get_db),
 ):
     """Delete a template (builtin templates cannot be deleted)"""
-    result = await db.execute(select(Template).where(Template.id == template_id))
+    result = await db.execute(select(Template).where(Template.id == template_id, Template.deleted_at.is_(None)))
     tmpl = result.scalar_one_or_none()
 
     if not tmpl:
@@ -345,7 +361,13 @@ async def delete_template(
             detail="You don't have permission to delete this template",
         )
 
-    await db.delete(tmpl)
+    tmpl.soft_delete()
+    await db.commit()
+
+    db.add(AuditLog(
+        user_id=user_id, action="delete", resource_type="template",
+        resource_id=template_id, summary=f"删除了模板 {tmpl.name}",
+    ))
     await db.commit()
 
     return ResponseBuilder.no_content("Template deleted successfully")

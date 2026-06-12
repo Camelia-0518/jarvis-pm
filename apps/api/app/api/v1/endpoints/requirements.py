@@ -2,16 +2,17 @@
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, asc
+from sqlalchemy import select
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.security import get_current_user_id
 from app.core.responses import ResponseBuilder
 from app.models.requirement import Requirement
-from app.models.project import Project
+from ._crud_helpers import verify_project_owner, get_owned_resource, list_project_resources, apply_update
 
 router = APIRouter()
 
@@ -70,6 +71,7 @@ def _calc_rice_score(r: Requirement) -> float:
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("/projects/{project_id}/requirements", response_model=dict)
 async def list_requirements(
     project_id: str,
@@ -79,26 +81,14 @@ async def list_requirements(
     db: AsyncSession = Depends(get_db)
 ):
     """List all requirements for a project"""
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
+    items, schema = await list_project_resources(
+        db, Requirement, project_id, user_id, RequirementResponse,
+        sort_by=sort_by, sort_order=order,
     )
-    if not proj_result.scalar_one_or_none():
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
-
-    query = select(Requirement).where(Requirement.project_id == project_id)
-
-    if sort_by == "rice_score":
-        query = query.order_by(desc(Requirement.rice_score) if order == "desc" else asc(Requirement.rice_score))
-    elif sort_by == "priority":
-        query = query.order_by(desc(Requirement.priority) if order == "desc" else asc(Requirement.priority))
-    else:
-        query = query.order_by(desc(Requirement.created_at) if order == "desc" else asc(Requirement.created_at))
-
-    result = await db.execute(query)
-    reqs = result.scalars().all()
-    return ResponseBuilder.success([RequirementResponse.model_validate(r) for r in reqs])
+    return ResponseBuilder.success([schema.model_validate(r) for r in items])
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/projects/{project_id}/requirements", response_model=dict)
 async def create_requirement(
     project_id: str,
@@ -107,25 +97,8 @@ async def create_requirement(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new requirement for a project"""
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    if not proj_result.scalar_one_or_none():
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
-
-    req = Requirement(
-        project_id=project_id,
-        created_by=user_id,
-        title=data.title,
-        description=data.description,
-        status=data.status or "backlog",
-        priority=data.priority or "p1",
-        rice_reach=data.rice_reach or 0,
-        rice_impact=data.rice_impact or 0.0,
-        rice_confidence=data.rice_confidence or 0,
-        rice_effort=data.rice_effort or 0.0,
-        kano_category=data.kano_category or "",
-    )
+    await verify_project_owner(db, project_id, user_id)
+    req = Requirement(project_id=project_id, created_by=user_id, **data.model_dump())
     req.rice_score = _calc_rice_score(req)
     db.add(req)
     await db.commit()
@@ -133,6 +106,7 @@ async def create_requirement(
     return ResponseBuilder.success(RequirementResponse.model_validate(req))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/requirements/{req_id}", response_model=dict)
 async def get_requirement(
     req_id: str,
@@ -140,18 +114,11 @@ async def get_requirement(
     db: AsyncSession = Depends(get_db)
 ):
     """Get a single requirement"""
-    result = await db.execute(
-        select(Requirement)
-        .where(Requirement.id == req_id)
-        .join(Project, Requirement.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    req = result.scalar_one_or_none()
-    if not req:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Requirement not found")
+    req = await get_owned_resource(db, Requirement, req_id, user_id)
     return ResponseBuilder.success(RequirementResponse.model_validate(req))
 
 
+@rate_limit(requests=30, window=60)
 @router.put("/requirements/{req_id}", response_model=dict)
 async def update_requirement(
     req_id: str,
@@ -160,26 +127,16 @@ async def update_requirement(
     db: AsyncSession = Depends(get_db)
 ):
     """Update a requirement"""
-    result = await db.execute(
-        select(Requirement)
-        .where(Requirement.id == req_id)
-        .join(Project, Requirement.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    req = result.scalar_one_or_none()
-    if not req:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Requirement not found")
-
-    update_data = data.model_dump(exclude_unset=True)
-    for field, value in update_data.items():
+    req = await get_owned_resource(db, Requirement, req_id, user_id)
+    for field, value in data.model_dump(exclude_unset=True).items():
         setattr(req, field, value)
-
     req.rice_score = _calc_rice_score(req)
     await db.commit()
     await db.refresh(req)
     return ResponseBuilder.success(RequirementResponse.model_validate(req))
 
 
+@rate_limit(requests=20, window=60)
 @router.delete("/requirements/{req_id}", response_model=dict)
 async def delete_requirement(
     req_id: str,
@@ -187,21 +144,13 @@ async def delete_requirement(
     db: AsyncSession = Depends(get_db)
 ):
     """Delete a requirement"""
-    result = await db.execute(
-        select(Requirement)
-        .where(Requirement.id == req_id)
-        .join(Project, Requirement.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    req = result.scalar_one_or_none()
-    if not req:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Requirement not found")
-
-    await db.delete(req)
+    req = await get_owned_resource(db, Requirement, req_id, user_id)
+    req.soft_delete()
     await db.commit()
     return ResponseBuilder.success({"deleted": True})
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/projects/{project_id}/requirements/priority-matrix", response_model=dict)
 async def get_priority_matrix(
     project_id: str,
@@ -209,14 +158,10 @@ async def get_priority_matrix(
     db: AsyncSession = Depends(get_db)
 ):
     """Get priority matrix summary (RICE + Kano)"""
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    if not proj_result.scalar_one_or_none():
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
+    await verify_project_owner(db, project_id, user_id)
 
     result = await db.execute(
-        select(Requirement).where(Requirement.project_id == project_id)
+        select(Requirement).where(Requirement.project_id == project_id, Requirement.deleted_at.is_(None))
     )
     reqs = result.scalars().all()
 
@@ -224,7 +169,7 @@ async def get_priority_matrix(
     rice_sorted = sorted(reqs, key=lambda r: r.rice_score, reverse=True)
 
     # Kano grouped
-    kano_groups: dict[str, list] = {"must_be": [], "one_dimensional": [], "attractive": [], "indifferent": [], "reverse": [], "": []}
+    kano_groups: Dict[str, List[Dict[str, Any]]] = {"must_be": [], "one_dimensional": [], "attractive": [], "indifferent": [], "reverse": [], "": []}
     for r in reqs:
         cat = r.kano_category or ""
         if cat in kano_groups:

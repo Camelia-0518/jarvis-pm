@@ -15,8 +15,8 @@ from enum import Enum, auto
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, AsyncGenerator, Callable
 from datetime import datetime
-from uuid import uuid4, UUID
-import json
+from uuid import uuid4
+
 
 
 class AgentState(Enum):
@@ -24,6 +24,7 @@ class AgentState(Enum):
     IDLE = auto()
     RUNNING = auto()
     PAUSED = auto()
+    WAITING_FOR_INPUT = auto()
     COMPLETED = auto()
     FAILED = auto()
     CANCELLED = auto()
@@ -94,10 +95,14 @@ class BaseAgent(ABC):
         初始化 Agent
 
         Args:
-            llm_client: LLM 客户端实例
+            llm_client: LLM 客户端实例（为 None 时自动创建默认客户端）
             max_steps: 最大执行步骤数
             timeout: 执行超时时间（秒）
         """
+        if llm_client is None:
+            from .llm_client import create_default_client
+            llm_client = create_default_client()
+
         self.id = uuid4()
         self.llm_client = llm_client
         self.max_steps = max_steps
@@ -108,23 +113,31 @@ class BaseAgent(ABC):
         self.steps: List[AgentStep] = []
         self.current_step_index = 0
         self.context: Dict[str, Any] = {}
+        self._started_at: Optional[datetime] = None
 
         # 事件回调
         self._on_step_start: Optional[Callable] = None
         self._on_step_end: Optional[Callable] = None
         self._on_state_change: Optional[Callable] = None
 
-    @abstractmethod
     async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
-        """
-        执行 Agent 任务
+        """执行 Agent 任务（模板方法：管理生命周期 + 异常处理）"""
+        self._set_state(AgentState.RUNNING)
+        try:
+            result = await self._do_execute(input_data)
+            self._set_state(AgentState.COMPLETED)
+            return result
+        except Exception as e:
+            self._set_state(AgentState.FAILED)
+            return AgentResult(
+                success=False,
+                error=str(e),
+                execution_time=self.elapsed_seconds,
+            )
 
-        Args:
-            input_data: 输入数据
-
-        Returns:
-            AgentResult: 执行结果
-        """
+    @abstractmethod
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
+        """子类实现具体执行逻辑（无需管理生命周期和异常处理）"""
         pass
 
     async def execute_stream(
@@ -237,9 +250,18 @@ class BaseAgent(ABC):
         """设置 Agent 状态"""
         old_state = self.state
         self.state = state
+        if state == AgentState.RUNNING:
+            self._started_at = datetime.now()
 
         if self._on_state_change and old_state != state:
             asyncio.create_task(self._on_state_change(old_state, state))
+
+    @property
+    def elapsed_seconds(self) -> float:
+        """执行耗时（秒），从 _set_state(RUNNING) 开始计时"""
+        if self._started_at is None:
+            return 0.0
+        return (datetime.now() - self._started_at).total_seconds()
 
     def get_info(self) -> Dict[str, Any]:
         """获取 Agent 信息"""

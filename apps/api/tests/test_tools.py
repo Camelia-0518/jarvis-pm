@@ -45,7 +45,7 @@ async def test_user_research_validation_error(async_client: AsyncClient):
 # ============== /competitors ==============
 
 @pytest.mark.integration
-async def test_competitor_analysis_with_crawler(async_client: AsyncClient):
+async def test_competitor_analysis_with_crawler(async_client: AsyncClient, sample_project: Project):
     """POST /competitors should return analysis when crawler succeeds."""
     with patch("app.api.v1.endpoints.tools.web_crawler_service.search_competitor_info", new_callable=AsyncMock) as mock_crawler, \
          patch("app.api.v1.endpoints.tools.ai_service.chat", new_callable=AsyncMock) as mock_chat:
@@ -64,7 +64,7 @@ async def test_competitor_analysis_with_crawler(async_client: AsyncClient):
         mock_chat.return_value = "## 竞品分析\n\n- 差异点1"
 
         response = await async_client.post("/api/v1/tools/competitors", json={
-            "project_id": "proj-1",
+            "project_id": sample_project.id,
             "competitors": ["竞品A"],
         })
         assert response.status_code == 200
@@ -76,7 +76,7 @@ async def test_competitor_analysis_with_crawler(async_client: AsyncClient):
 
 
 @pytest.mark.integration
-async def test_competitor_analysis_candidate_mode(async_client: AsyncClient):
+async def test_competitor_analysis_candidate_mode(async_client: AsyncClient, sample_project: Project):
     """POST /competitors should enter candidate mode when crawler fails."""
     with patch("app.api.v1.endpoints.tools.web_crawler_service.search_competitor_info", new_callable=AsyncMock) as mock_crawler, \
          patch("app.api.v1.endpoints.tools.ai_service.chat", new_callable=AsyncMock) as mock_chat:
@@ -84,7 +84,7 @@ async def test_competitor_analysis_candidate_mode(async_client: AsyncClient):
         mock_chat.return_value = '[{"name": "候选竞品", "description": "候选", "source_detail": "AI推断"}]'
 
         response = await async_client.post("/api/v1/tools/competitors", json={
-            "project_id": "proj-1",
+            "project_id": sample_project.id,
             "competitors": ["竞品A"],
         })
         assert response.status_code == 200
@@ -96,7 +96,7 @@ async def test_competitor_analysis_candidate_mode(async_client: AsyncClient):
 
 
 @pytest.mark.integration
-async def test_competitor_analysis_no_data(async_client: AsyncClient):
+async def test_competitor_analysis_no_data(async_client: AsyncClient, sample_project: Project):
     """POST /competitors should return error when both crawler and LLM fail."""
     with patch("app.api.v1.endpoints.tools.web_crawler_service.search_competitor_info", new_callable=AsyncMock) as mock_crawler, \
          patch("app.api.v1.endpoints.tools.ai_service.chat", new_callable=AsyncMock) as mock_chat:
@@ -104,10 +104,10 @@ async def test_competitor_analysis_no_data(async_client: AsyncClient):
         mock_chat.return_value = "invalid json"
 
         response = await async_client.post("/api/v1/tools/competitors", json={
-            "project_id": "proj-1",
+            "project_id": sample_project.id,
             "competitors": ["竞品A"],
         })
-        assert response.status_code == 200
+        assert response.status_code == 400
         data = response.json()
         assert data["success"] is False
 
@@ -115,7 +115,7 @@ async def test_competitor_analysis_no_data(async_client: AsyncClient):
 # ============== /competitors/confirm ==============
 
 @pytest.mark.integration
-async def test_confirm_competitor_analysis(async_client: AsyncClient):
+async def test_confirm_competitor_analysis(async_client: AsyncClient, sample_project: Project):
     """POST /competitors/confirm should generate report for confirmed candidates."""
     with patch("app.api.v1.endpoints.tools.web_crawler_service.search_competitor_info", new_callable=AsyncMock) as mock_crawler, \
          patch("app.api.v1.endpoints.tools.ai_service.chat", new_callable=AsyncMock) as mock_chat:
@@ -123,7 +123,7 @@ async def test_confirm_competitor_analysis(async_client: AsyncClient):
         mock_chat.return_value = "## 正式竞品分析"
 
         response = await async_client.post("/api/v1/tools/competitors/confirm", json={
-            "project_id": "proj-1",
+            "project_id": sample_project.id,
             "competitors": ["竞品A"],
             "confirmed_candidates": [{"name": "竞品A", "description": "已确认"}],
         })
@@ -143,7 +143,7 @@ async def test_confirm_competitor_analysis_no_candidates(async_client: AsyncClie
         "competitors": ["竞品A"],
         "confirmed_candidates": [],
     })
-    assert response.status_code == 200
+    assert response.status_code == 400
     data = response.json()
     assert data["success"] is False
 

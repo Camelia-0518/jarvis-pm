@@ -7,8 +7,10 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
-import uuid
+
 import asyncio
+import logging
+import traceback
 
 from app.services.skill_processor import skill_processor
 from app.services.skill_processor_enhanced import SkillProcessorEnhanced
@@ -21,6 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 
 # ============== Request/Response Models ==============
@@ -112,6 +116,7 @@ class SkillFilterOptions(BaseModel):
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("/definitions", response_model=dict)
 async def get_all_skills(
     category: Optional[str] = None,
@@ -152,6 +157,7 @@ async def get_all_skills(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/definitions/reload", response_model=dict)
 async def reload_skills():
     """重新加载技能定义（热更新，无需重启后端进程）"""
@@ -162,6 +168,7 @@ async def reload_skills():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/definitions/{skill_id}", response_model=dict)
 async def get_skill_by_id(skill_id: str):
     """获取特定技能定义"""
@@ -177,6 +184,7 @@ async def get_skill_by_id(skill_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/by-role/{role}", response_model=dict)
 async def get_skills_by_role(role: str):
     """根据 Agent 角色获取技能列表"""
@@ -191,6 +199,7 @@ async def get_skills_by_role(role: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/categories", response_model=dict)
 async def get_skill_categories():
     """获取技能分类列表"""
@@ -208,6 +217,7 @@ async def get_skill_categories():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/validate", response_model=dict)
 async def validate_skill_input(request: SkillValidationRequest):
     """验证技能输入参数"""
@@ -239,8 +249,8 @@ async def validate_skill_input(request: SkillValidationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/execute", response_model=dict)
 @rate_limit(requests=10, window=60)
+@router.post("/execute")
 async def execute_skill(
     request: SkillExecutionRequest,
     db: AsyncSession = Depends(get_db)
@@ -313,8 +323,8 @@ async def execute_skill(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/execute-async", response_model=dict)
 @rate_limit(requests=5, window=60)
+@router.post("/execute-async")
 async def execute_skill_async(
     request: SkillExecutionRequest,
     background_tasks: BackgroundTasks,
@@ -406,14 +416,20 @@ async def _execute_skill_background(
 
         except Exception as e:
             # 更新失败状态
+            tb = traceback.format_exc()
+            logger.error(
+                "Skill background execution failed: execution_id=%s skill=%s error=%s\n%s",
+                execution_id, skill_id, e, tb
+            )
             record = await db.get(SkillExecution, execution_id)
             if record:
                 record.success = False
-                record.error_message = str(e)
+                record.error_message = f"{type(e).__name__}: {e}"
                 await db.commit()
             raise
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/executions/{execution_id}", response_model=dict)
 async def get_execution_status(
     execution_id: str,
@@ -433,6 +449,7 @@ async def get_execution_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/executions", response_model=dict)
 async def list_executions(
     skill_id: Optional[str] = None,
@@ -471,6 +488,7 @@ async def list_executions(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/examples/{skill_id}", response_model=dict)
 async def get_skill_examples(skill_id: str):
     """获取技能的示例输入"""
@@ -491,6 +509,7 @@ async def get_skill_examples(skill_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/agent-roles", response_model=dict)
 async def get_agent_roles():
     """获取所有 Agent 角色及其技能"""

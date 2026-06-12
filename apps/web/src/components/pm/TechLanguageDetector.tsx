@@ -294,7 +294,7 @@ export default function TechLanguageDetector() {
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <span className="font-medium">检测到: "{issue.term.term}"</span>
+                  <span className="font-medium">检测到: &ldquo;{issue.term.term}&rdquo;</span>
                   <span
                     className={`rounded px-1.5 py-0.5 text-xs ${
                       issue.term.severity === "error"
@@ -307,7 +307,7 @@ export default function TechLanguageDetector() {
                 </div>
                 <div className="mt-1">
                   💡 建议改为:
-                  <span className="font-medium">"{issue.term.suggestion}"</span>
+                  <span className="font-medium">&ldquo;{issue.term.suggestion}&rdquo;</span>
                 </div>
                 <div className="mt-0.5 text-xs opacity-80">{issue.term.explanation}</div>
               </div>

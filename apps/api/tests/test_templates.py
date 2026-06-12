@@ -122,5 +122,8 @@ async def test_delete_template(async_client: AsyncClient, db_session: AsyncSessi
     response = await async_client.delete(f"/api/v1/templates/{template.id}")
     assert response.status_code == 200
 
+    # 软删除验证：记录仍在但 deleted_at 已设置
     result = await db_session.execute(select(Template).where(Template.id == template.id))
-    assert result.scalar_one_or_none() is None
+    tmpl = result.scalar_one_or_none()
+    assert tmpl is not None
+    assert tmpl.deleted_at is not None

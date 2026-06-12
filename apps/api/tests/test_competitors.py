@@ -63,7 +63,7 @@ async def test_list_competitors_with_data(async_client: AsyncClient, sample_comp
 async def test_list_competitors_project_not_found(async_client: AsyncClient):
     """GET for non-existent project should return NOT_FOUND."""
     response = await async_client.get("/api/v1/projects/non-existent/competitors")
-    assert response.status_code == 200
+    assert response.status_code == 404
     data = response.json()
     assert data["success"] is False
     assert data["error"]["code"] == "NOT_FOUND"
@@ -107,7 +107,7 @@ async def test_create_competitor_project_not_found(async_client: AsyncClient):
     """POST for non-existent project should return NOT_FOUND."""
     payload = {"name": "Test"}
     response = await async_client.post("/api/v1/projects/non-existent/competitors", json=payload)
-    assert response.status_code == 200
+    assert response.status_code == 404
     data = response.json()
     assert data["success"] is False
     assert data["error"]["code"] == "NOT_FOUND"
@@ -131,7 +131,7 @@ async def test_get_competitor(async_client: AsyncClient, sample_competitor: Comp
 async def test_get_competitor_not_found(async_client: AsyncClient):
     """GET non-existent competitor should return NOT_FOUND."""
     response = await async_client.get("/api/v1/competitors/non-existent")
-    assert response.status_code == 200
+    assert response.status_code == 404
     data = response.json()
     assert data["success"] is False
     assert data["error"]["code"] == "NOT_FOUND"
@@ -161,7 +161,7 @@ async def test_update_competitor(async_client: AsyncClient, sample_competitor: C
 async def test_update_competitor_not_found(async_client: AsyncClient):
     """PUT for non-existent competitor should return NOT_FOUND."""
     response = await async_client.put("/api/v1/competitors/non-existent", json={"name": "x"})
-    assert response.status_code == 200
+    assert response.status_code == 404
     data = response.json()
     assert data["success"] is False
     assert data["error"]["code"] == "NOT_FOUND"
@@ -179,16 +179,18 @@ async def test_delete_competitor(async_client: AsyncClient, sample_competitor: C
     assert data["success"] is True
     assert data["data"]["deleted"] is True
 
-    # Verify DB
+    # Verify soft deletion — record still exists but deleted_at is set
     result = await db_session.execute(select(Competitor).where(Competitor.id == sample_competitor.id))
-    assert result.scalar_one_or_none() is None
+    found = result.scalar_one_or_none()
+    assert found is not None
+    assert found.deleted_at is not None
 
 
 @pytest.mark.integration
 async def test_delete_competitor_not_found(async_client: AsyncClient):
     """DELETE non-existent competitor should return NOT_FOUND."""
     response = await async_client.delete("/api/v1/competitors/non-existent")
-    assert response.status_code == 200
+    assert response.status_code == 404
     data = response.json()
     assert data["success"] is False
     assert data["error"]["code"] == "NOT_FOUND"

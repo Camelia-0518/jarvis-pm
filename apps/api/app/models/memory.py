@@ -6,13 +6,14 @@
 存储用户偏好、项目风格、反馈等长期记忆
 """
 
-from sqlalchemy import Column, String, DateTime, Integer, Float, Text, JSON
+from sqlalchemy import Column, String, DateTime, Integer, Float, JSON
 from sqlalchemy.sql import func
 from app.core.database import Base
+from app.models.mixins import TimestampMixin
 import uuid
 
 
-class MemoryEntry(Base):
+class MemoryEntry(Base, TimestampMixin):
     """记忆条目"""
     __tablename__ = "memory_entries"
 
@@ -24,5 +25,4 @@ class MemoryEntry(Base):
     project_id = Column(String(36), nullable=True, index=True)
     importance = Column(Float, nullable=False, default=5.0)  # 0-10
     access_count = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

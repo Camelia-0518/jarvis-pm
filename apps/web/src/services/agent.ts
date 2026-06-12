@@ -1,5 +1,5 @@
-// Agent API 服务
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api/v1';
+// Agent API service — thin wrapper over the central request() function
+import { request } from "@/lib/api";
 
 export interface AgentInfo {
   name: string;
@@ -15,7 +15,7 @@ export interface PRDRequest {
   key_features: string[];
   constraints?: string[];
   sections?: string[];
-  skip_evaluation?: boolean; // 默认 true，跳过 AI 评估以加快速度
+  skip_evaluation?: boolean;
 }
 
 export interface TaskResponse {
@@ -37,29 +37,19 @@ export interface TaskResult {
 }
 
 export const AgentService = {
-  // 获取所有 Agent
   async listAgents(): Promise<AgentInfo[]> {
-    const res = await fetch(`${API_BASE}/agents`);
-    if (!res.ok) throw new Error('Failed to fetch agents');
-    return res.json();
+    return request<AgentInfo[]>('/agents');
   },
 
-  // 生成 PRD
   async generatePRD(data: PRDRequest): Promise<TaskResponse> {
-    const res = await fetch(`${API_BASE}/agents/prd/generate`, {
+    return request<TaskResponse>('/agents/prd/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
-    if (!res.ok) throw new Error('Failed to submit PRD task');
-    return res.json();
   },
 
-  // 获取任务状态
   async getTaskStatus(taskId: string): Promise<TaskResult> {
-    const res = await fetch(`${API_BASE}/agents/tasks/${taskId}`);
-    if (!res.ok) throw new Error('Failed to fetch task status');
-    return res.json();
+    return request<TaskResult>(`/agents/tasks/${taskId}`);
   },
 
   // 轮询任务状态（支持进度更新）
@@ -99,8 +89,6 @@ export const AgentService = {
 
   // 获取任务进度
   async getTaskProgress(taskId: string): Promise<{ progress: { total_steps: number; completed_steps: number; latest_update: unknown; updates: unknown[] } }> {
-    const res = await fetch(`${API_BASE}/agents/tasks/${taskId}/progress`);
-    if (!res.ok) throw new Error('Failed to fetch task progress');
-    return res.json();
+    return request<{ progress: { total_steps: number; completed_steps: number; latest_update: unknown; updates: unknown[] } }>(`/agents/tasks/${taskId}/progress`);
   },
 };

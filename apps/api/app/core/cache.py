@@ -1,12 +1,12 @@
 """Cache layer implementation with Redis support"""
 
+import fnmatch
 import json
 import hashlib
 import logging
-import pickle
-from typing import Any, Optional, Callable, Union
+from typing import Any, Optional, Callable
 from functools import wraps
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import asyncio
 
 from app.core.config import settings
@@ -30,6 +30,8 @@ class CacheManager:
         self._local_cache: dict = {}
         self._local_ttl: dict = {}
         self._lock = asyncio.Lock()
+        # Cache statistics
+        self._stats = {"hits": 0, "misses": 0, "sets": 0, "deletes": 0}
 
     async def connect(self):
         """Connect to Redis if available"""
@@ -52,8 +54,8 @@ class CacheManager:
 
     def _generate_key(self, prefix: str, *args, **kwargs) -> str:
         """Generate cache key from arguments"""
-        key_data = f"{prefix}:{str(args)}:{str(kwargs)}"
-        return f"{prefix}:{hashlib.md5(key_data.encode()).hexdigest()}"
+        key_data = json.dumps({"args": args, "kwargs": kwargs}, sort_keys=True, default=str)
+        return f"{prefix}:{hashlib.sha256(key_data.encode()).hexdigest()}"
 
     def _serialize(self, value: Any) -> str:
         """Serialize value to string"""
@@ -72,28 +74,35 @@ class CacheManager:
             return value
 
     async def get(self, key: str) -> Optional[Any]:
-        """Get value from cache"""
-        # Try Redis first
-        if self._redis:
-            try:
-                value = await self._redis.get(key)
-                if value:
-                    return self._deserialize(value)
-            except Exception:
-                pass
-
-        # Fallback to local cache
+        """Get value from cache (L1 local -> L2 Redis)"""
+        # L1: Local cache (fastest)
         async with self._lock:
             if key in self._local_cache:
                 expiry = self._local_ttl.get(key)
-                if expiry and expiry > datetime.utcnow():
+                if expiry and expiry > datetime.now(timezone.utc):
+                    self._stats["hits"] += 1
                     return self._local_cache[key]
                 else:
-                    # Expired, remove
                     del self._local_cache[key]
                     if key in self._local_ttl:
                         del self._local_ttl[key]
 
+        # L2: Redis cache
+        if self._redis:
+            try:
+                value = await self._redis.get(key)
+                if value:
+                    deserialized = self._deserialize(value)
+                    # Backfill L1 for faster subsequent access
+                    async with self._lock:
+                        self._local_cache[key] = deserialized
+                        self._local_ttl[key] = datetime.now(timezone.utc) + timedelta(seconds=300)
+                    self._stats["hits"] += 1
+                    return deserialized
+            except Exception:
+                logger.warning("Redis L2 read failed, degraded to L1-only mode")
+
+        self._stats["misses"] += 1
         return None
 
     async def set(
@@ -103,7 +112,7 @@ class CacheManager:
         ttl: int = 3600,
         nx: bool = False
     ) -> bool:
-        """Set value in cache
+        """Set value in cache (dual-write: L1 local + L2 Redis)
 
         Args:
             key: Cache key
@@ -111,30 +120,28 @@ class CacheManager:
             ttl: Time to live in seconds
             nx: Only set if key doesn't exist
         """
-        serialized = self._serialize(value)
+        # Always write to L1 (local) first
+        async with self._lock:
+            if nx and key in self._local_cache:
+                return False
+            self._local_cache[key] = value
+            self._local_ttl[key] = datetime.now(timezone.utc) + timedelta(seconds=ttl)
 
-        # Try Redis first
+        # Async write to L2 (Redis)
         if self._redis:
             try:
+                serialized = self._serialize(value)
                 if nx:
                     result = await self._redis.setnx(key, serialized)
                     if result:
                         await self._redis.expire(key, ttl)
-                    return bool(result)
                 else:
                     await self._redis.setex(key, ttl, serialized)
-                    return True
             except Exception as e:
-                logger.error(f"Redis set error: {e}")
+                logger.warning("Redis L2 write failed (degraded): %s", e)
 
-        # Fallback to local cache
-        async with self._lock:
-            if nx and key in self._local_cache:
-                return False
-
-            self._local_cache[key] = value
-            self._local_ttl[key] = datetime.utcnow() + timedelta(seconds=ttl)
-            return True
+        self._stats["sets"] += 1
+        return True
 
     async def delete(self, key: str) -> bool:
         """Delete key from cache"""
@@ -144,7 +151,7 @@ class CacheManager:
             try:
                 result = await self._redis.delete(key) > 0
             except Exception:
-                pass
+                logger.warning("Redis delete failed for key: %s", key)
 
         async with self._lock:
             if key in self._local_cache:
@@ -153,6 +160,8 @@ class CacheManager:
                     del self._local_ttl[key]
                 result = True
 
+        if result:
+            self._stats["deletes"] += 1
         return result
 
     async def exists(self, key: str) -> bool:
@@ -161,12 +170,12 @@ class CacheManager:
             try:
                 return await self._redis.exists(key) > 0
             except Exception:
-                pass
+                logger.warning("Redis exists check failed for key: %s", key)
 
         async with self._lock:
             if key in self._local_cache:
                 expiry = self._local_ttl.get(key)
-                if expiry and expiry > datetime.utcnow():
+                if expiry and expiry > datetime.now(timezone.utc):
                     return True
         return False
 
@@ -176,7 +185,7 @@ class CacheManager:
             try:
                 return await self._redis.incrby(key, amount)
             except Exception:
-                pass
+                logger.warning("Redis increment failed for key: %s", key)
 
         async with self._lock:
             current = self._local_cache.get(key, 0)
@@ -191,13 +200,35 @@ class CacheManager:
             try:
                 return await self._redis.expire(key, ttl)
             except Exception:
-                pass
+                logger.warning("Redis expire set failed for key: %s", key)
 
         async with self._lock:
             if key in self._local_cache:
-                self._local_ttl[key] = datetime.utcnow() + timedelta(seconds=ttl)
+                self._local_ttl[key] = datetime.now(timezone.utc) + timedelta(seconds=ttl)
                 return True
         return False
+
+    async def warm_up(self, items: list[dict]) -> int:
+        """Preload cache with frequently accessed items
+
+        Args:
+            items: List of {"key": str, "value": Any, "ttl": int} dicts
+
+        Returns:
+            Number of items preloaded
+        """
+        count = 0
+        for item in items:
+            try:
+                key = item["key"]
+                value = item["value"]
+                ttl = item.get("ttl", 3600)
+                await self.set(key, value, ttl=ttl)
+                count += 1
+            except Exception as e:
+                logger.warning(f"Cache warm-up failed for key {item.get('key')}: {e}")
+        logger.info(f"Cache warm-up completed: {count}/{len(items)} items")
+        return count
 
     async def clear_pattern(self, pattern: str) -> int:
         """Clear all keys matching pattern"""
@@ -205,15 +236,16 @@ class CacheManager:
 
         if self._redis:
             try:
-                keys = await self._redis.keys(pattern)
-                if keys:
-                    count = await self._redis.delete(*keys)
+                # Use SCAN instead of KEYS to avoid blocking Redis
+                async for key in self._redis.scan_iter(match=pattern):
+                    await self._redis.delete(key)
+                    count += 1
             except Exception:
-                pass
+                logger.warning("Redis pattern delete failed for pattern: %s", pattern)
 
         # Local cache - simple substring match
         async with self._lock:
-            keys_to_delete = [k for k in self._local_cache.keys() if pattern.replace("*", "") in k]
+            keys_to_delete = [k for k in self._local_cache.keys() if fnmatch.fnmatch(k, pattern)]
             for key in keys_to_delete:
                 del self._local_cache[key]
                 if key in self._local_ttl:
@@ -279,6 +311,15 @@ class CacheManager:
 
     async def health_check(self) -> dict:
         """Check cache health"""
+        total = self._stats["hits"] + self._stats["misses"]
+        hit_rate = round(self._stats["hits"] / total * 100, 1) if total else 0
+        stats = {
+            "hits": self._stats["hits"],
+            "misses": self._stats["misses"],
+            "sets": self._stats["sets"],
+            "hit_rate_percent": hit_rate,
+        }
+
         if self._redis:
             try:
                 info = await self._redis.info()
@@ -287,19 +328,22 @@ class CacheManager:
                     "type": "redis",
                     "version": info.get("redis_version", "unknown"),
                     "used_memory": info.get("used_memory_human", "unknown"),
-                    "connected_clients": info.get("connected_clients", 0)
+                    "connected_clients": info.get("connected_clients", 0),
+                    **stats,
                 }
             except Exception as e:
                 return {
                     "status": "error",
                     "type": "redis",
-                    "error": str(e)
+                    "error": str(e),
+                    **stats,
                 }
 
         return {
             "status": "active",
             "type": "memory",
-            "keys": len(self._local_cache)
+            "keys": len(self._local_cache),
+            **stats,
         }
 
 

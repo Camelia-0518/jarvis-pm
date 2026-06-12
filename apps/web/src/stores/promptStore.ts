@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { promptApi, type PromptTemplate } from '@/lib/api';
+import { setLoading, setError } from '@/lib/storeHelpers';
 
 interface PromptState {
   prompts: PromptTemplate[];
@@ -28,68 +29,53 @@ export const usePromptStore = create<PromptState>((set, get) => ({
   error: null,
 
   fetchPrompts: async (params) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const result = await promptApi.list(params);
       set({ prompts: result.items, isLoading: false });
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to fetch prompts',
-        isLoading: false,
-      });
+      setError(set, error, 'Failed to fetch prompts');
     }
   },
 
   fetchVersions: async (name) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       const versions = await promptApi.versions(name);
       set({ versions, isLoading: false });
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to fetch versions',
-        isLoading: false,
-      });
+      setError(set, error, "Failed to fetch versions");
     }
   },
 
   createPrompt: async (data) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       await promptApi.create(data);
       await get().fetchPrompts();
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to create prompt',
-        isLoading: false,
-      });
+      setError(set, error, "Failed to create prompt");
       throw error;
     }
   },
 
   activatePrompt: async (id) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       await promptApi.activate(id);
       await get().fetchPrompts();
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to activate prompt',
-        isLoading: false,
-      });
+      setError(set, error, "Failed to activate prompt");
     }
   },
 
   deletePrompt: async (id) => {
-    set({ isLoading: true, error: null });
+    setLoading(set);
     try {
       await promptApi.delete(id);
       await get().fetchPrompts();
     } catch (error) {
-      set({
-        error: error instanceof Error ? error.message : 'Failed to delete prompt',
-        isLoading: false,
-      });
+      setError(set, error, "Failed to delete prompt");
     }
   },
 

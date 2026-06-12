@@ -27,6 +27,7 @@ class PromptService:
             select(PromptTemplate).where(
                 PromptTemplate.name == name,
                 PromptTemplate.version == version,
+                PromptTemplate.deleted_at.is_(None),
             )
         )
         if existing.scalar_one_or_none():
@@ -52,7 +53,7 @@ class PromptService:
     async def activate_prompt(db: AsyncSession, prompt_id: str) -> PromptTemplate:
         """Activate a prompt version and deactivate others with the same name"""
         result = await db.execute(
-            select(PromptTemplate).where(PromptTemplate.id == prompt_id)
+            select(PromptTemplate).where(PromptTemplate.id == prompt_id, PromptTemplate.deleted_at.is_(None))
         )
         prompt = result.scalar_one_or_none()
         if not prompt:
@@ -64,6 +65,7 @@ class PromptService:
                 PromptTemplate.name == prompt.name,
                 PromptTemplate.id != prompt_id,
                 PromptTemplate.is_active == True,
+                PromptTemplate.deleted_at.is_(None),
             )
         )
         # Use update statement for batch deactivation
@@ -89,6 +91,7 @@ class PromptService:
             select(PromptTemplate).where(
                 PromptTemplate.name == name,
                 PromptTemplate.is_active == True,
+                PromptTemplate.deleted_at.is_(None),
             )
         )
         return result.scalar_one_or_none()
@@ -97,7 +100,7 @@ class PromptService:
     async def get_prompt_by_id(db: AsyncSession, prompt_id: str) -> Optional[PromptTemplate]:
         """Get prompt by ID"""
         result = await db.execute(
-            select(PromptTemplate).where(PromptTemplate.id == prompt_id)
+            select(PromptTemplate).where(PromptTemplate.id == prompt_id, PromptTemplate.deleted_at.is_(None))
         )
         return result.scalar_one_or_none()
 
@@ -109,9 +112,12 @@ class PromptService:
         is_active: Optional[bool] = None,
         page: int = 1,
         limit: int = 20,
+        user_id: Optional[str] = None,
     ) -> tuple[List[PromptTemplate], int]:
-        """List prompts with filtering and pagination"""
-        query = select(PromptTemplate)
+        """List prompts with filtering and pagination. When user_id provided, scope to that user."""
+        query = select(PromptTemplate).where(PromptTemplate.deleted_at.is_(None))
+        if user_id:
+            query = query.where(PromptTemplate.created_by == user_id)
 
         if name:
             query = query.where(PromptTemplate.name == name)
@@ -140,7 +146,7 @@ class PromptService:
         """List all versions for a given prompt name"""
         result = await db.execute(
             select(PromptTemplate)
-            .where(PromptTemplate.name == name)
+            .where(PromptTemplate.name == name, PromptTemplate.deleted_at.is_(None))
             .order_by(desc(PromptTemplate.created_at))
         )
         return list(result.scalars().all())
@@ -154,7 +160,7 @@ class PromptService:
     ) -> PromptTemplate:
         """Update mutable fields of a prompt (content is immutable after creation)"""
         result = await db.execute(
-            select(PromptTemplate).where(PromptTemplate.id == prompt_id)
+            select(PromptTemplate).where(PromptTemplate.id == prompt_id, PromptTemplate.deleted_at.is_(None))
         )
         prompt = result.scalar_one_or_none()
         if not prompt:
@@ -173,16 +179,17 @@ class PromptService:
     async def delete_prompt(db: AsyncSession, prompt_id: str) -> None:
         """Delete a prompt version. Cannot delete if it's the only active version."""
         result = await db.execute(
-            select(PromptTemplate).where(PromptTemplate.id == prompt_id)
+            select(PromptTemplate).where(PromptTemplate.id == prompt_id, PromptTemplate.deleted_at.is_(None))
         )
         prompt = result.scalar_one_or_none()
         if not prompt:
             raise ResourceNotFoundError("PromptTemplate", prompt_id)
 
-        # Check if this is the only version for this name
+        # Check if this is the only non-deleted version for this name
         versions_result = await db.execute(
             select(func.count(PromptTemplate.id)).where(
-                PromptTemplate.name == prompt.name
+                PromptTemplate.name == prompt.name,
+                PromptTemplate.deleted_at.is_(None),
             )
         )
         version_count = versions_result.scalar()
@@ -192,5 +199,5 @@ class PromptService:
                 message="Cannot delete the only version of a prompt. Create another version first."
             )
 
-        await db.delete(prompt)
+        prompt.soft_delete()
         await db.commit()

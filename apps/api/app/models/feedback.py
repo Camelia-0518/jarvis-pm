@@ -5,9 +5,10 @@ from sqlalchemy.sql import func
 import uuid
 
 from app.core.database import Base
+from app.models.mixins import SoftDeleteMixin
 
 
-class Feedback(Base):
+class Feedback(Base, SoftDeleteMixin):
     """User feedback entry"""
     __tablename__ = "feedback"
 

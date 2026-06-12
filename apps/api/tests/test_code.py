@@ -37,11 +37,21 @@ async def test_generate_prototype_too_short(async_client: AsyncClient):
 
 # ============== /prototype-ai ==============
 
+def _make_mock_stream(chunks, report):
+    async def _stream(*args, **kwargs):
+        for chunk in chunks:
+            yield {"event": "chunk", "data": chunk}
+        yield {"event": "done", "data": {"report": report}}
+    return _stream
+
+
 @pytest.mark.integration
 async def test_generate_prototype_ai(async_client: AsyncClient):
     """POST /api/v1/code/prototype-ai should return AI-enhanced HTML."""
-    with patch("app.api.v1.endpoints.code.ai_service.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "```html\n<html>AI原型</html>\n```"
+    report = {"pages": 1, "page_list": [{"name": "index"}], "interactions": {"total": 0}}
+    with patch("app.api.v1.endpoints.code.prototype_ai_service.extract_skeleton", new_callable=AsyncMock) as mock_extract, \
+         patch("app.api.v1.endpoints.code.prototype_ai_service.generate_prototype_stream", new=_make_mock_stream(["<html>AI原型</html>"], report)):
+        mock_extract.return_value = {"product_name": "Test", "pages": [{"name": "首页"}]}
 
         response = await async_client.post("/api/v1/code/prototype-ai", json={
             "prd_content": "A" * 100,
@@ -58,8 +68,10 @@ async def test_generate_prototype_ai(async_client: AsyncClient):
 @pytest.mark.integration
 async def test_generate_prototype_ai_no_code_block(async_client: AsyncClient):
     """AI response without code block should still produce valid HTML."""
-    with patch("app.api.v1.endpoints.code.ai_service.chat", new_callable=AsyncMock) as mock_chat:
-        mock_chat.return_value = "<div>Some content</div>"
+    report = {"pages": 1, "page_list": [], "interactions": {"total": 0}}
+    with patch("app.api.v1.endpoints.code.prototype_ai_service.extract_skeleton", new_callable=AsyncMock) as mock_extract, \
+         patch("app.api.v1.endpoints.code.prototype_ai_service.generate_prototype_stream", new=_make_mock_stream(["<div>Some content</div>"], report)):
+        mock_extract.return_value = {"product_name": "Test", "pages": []}
 
         response = await async_client.post("/api/v1/code/prototype-ai", json={
             "prd_content": "A" * 100,

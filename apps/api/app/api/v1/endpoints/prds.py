@@ -24,6 +24,8 @@ from app.core.database import get_db
 from app.core.rate_limit import rate_limit
 from app.core.responses import ResponseBuilder
 from app.core.security import get_current_user_id
+from app.core.permissions import require_resource_owner, require_project_owner
+from app.models.state_machine import prd_sm
 from app.services.ai_service import ai_service
 from app.models.prd import PRD, PRDStatus
 from app.models.prd_version import PRDVersion
@@ -31,6 +33,8 @@ from app.models.project import Project
 from app.models.persona import Persona
 from app.models.competitor import Competitor
 from app.core.exceptions import AppException
+from app.models.job import Job, JobType, JobStatus, FailureType
+from app.models.audit_log import AuditLog
 
 router = APIRouter()
 
@@ -346,10 +350,7 @@ async def create_prd(
 ):
     """Create a new PRD with template structure (AI generation is async)"""
     # Get project info for context
-    result = await db.execute(
-        select(Project).where(Project.id == data.project_id, Project.created_by == user_id)
-    )
-    project = result.scalar_one_or_none()
+    project = await require_project_owner(db, data.project_id, user_id)
 
     template = data.template or "default"
     # Template takes priority for industry mapping; fallback to project.industry or general
@@ -402,6 +403,17 @@ async def create_prd(
     await db.commit()
     await db.refresh(new_prd)
 
+    # Audit log
+    db.add(AuditLog(
+        user_id=user_id,
+        workspace_id=getattr(new_prd, "workspace_id", None),
+        action="create",
+        resource_type="prd",
+        resource_id=new_prd.id,
+        summary=f"创建了 PRD {new_prd.title}",
+    ))
+    await db.commit()
+
     return ResponseBuilder.success({
         "id": new_prd.id,
         "project_id": new_prd.project_id,
@@ -423,13 +435,7 @@ async def get_prd(
     db: AsyncSession = Depends(get_db)
 ):
     """Get PRD by ID"""
-    result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = result.scalar_one_or_none()
-
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
 
     return ResponseBuilder.success({
         "id": prd.id,
@@ -444,22 +450,60 @@ async def get_prd(
     })
 
 
-async def _run_compliance_check(prd_id: str, title: str, industry: str, markdown: str):
-    """Background task: run compliance check after PRD update"""
+async def _run_compliance_check_handler(job_id: str, session: AsyncSession) -> None:
+    """Job handler: 执行合规检查。由 job_runner 调用，session 已提供。"""
+    import time as _time
+    _start = _time.monotonic()
+
+    job = await session.get(Job, job_id)
+    if not job or not job.prd_id:
+        return
+
+    from app.models.prd import PRD as _PRD
+    prd = await session.get(_PRD, job.prd_id)
+    if not prd:
+        job.status = JobStatus.FAILED
+        job.failure_type = FailureType.SYSTEM
+        job.error_message = "PRD not found"
+        await session.commit()
+        return
+
+    # QUEUED → RUNNING
+    job.status = JobStatus.RUNNING
+    job.started_at = func.now()
+    await session.commit()
+
     try:
         from app.agents.agents.compliance_checker import ComplianceChecker
         checker = ComplianceChecker()
         result = await checker.execute({
-            "product_name": title,
-            "industry": industry,
-            "features": [markdown[:5000]],  # Truncate for analysis
+            "product_name": prd.title,
+            "industry": prd.content.get("industry", "general") if isinstance(prd.content, dict) else "general",
+            "features": [(prd.markdown or "")[:5000]],
         })
+
+        job.status = JobStatus.SUCCEEDED if result.success else JobStatus.FAILED
+        job.result_summary = (result.output or "")[:500] if result.success else (result.error or "未知错误")
+        if not result.success:
+            job.failure_type = FailureType.BUSINESS
+            job.error_code = "COMPLIANCE_FAILED"
+        job.completed_at = func.now()
+        job.duration_ms = int((_time.monotonic() - _start) * 1000)
+        await session.commit()
+
         if result.success:
-            logging.info("Compliance check passed for PRD %s", prd_id)
+            logging.info("Compliance check passed for PRD %s (job=%s)", job.prd_id, job_id)
         else:
-            logging.warning("Compliance check found issues for PRD %s: %s", prd_id, result.error)
-    except Exception:
-        logging.exception("Compliance check failed for PRD %s", prd_id)
+            logging.warning("Compliance check issues for PRD %s: %s", job.prd_id, result.error)
+    except Exception as exc:
+        logging.exception("Compliance check failed for PRD %s (job=%s)", job.prd_id, job_id)
+        job.status = JobStatus.FAILED
+        job.failure_type = FailureType.SYSTEM
+        job.error_code = "EXECUTION_ERROR"
+        job.error_message = str(exc)[:500]
+        job.completed_at = func.now()
+        job.duration_ms = int((_time.monotonic() - _start) * 1000)
+        await session.commit()
 
 
 async def _index_prd_in_background(source_id: str, content: str, metadata: dict):
@@ -489,13 +533,7 @@ async def update_prd(
     db: AsyncSession = Depends(get_db)
 ):
     """Update PRD"""
-    result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = result.scalar_one_or_none()
-
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
 
     # Create version snapshot before update (if content changed)
     if data.markdown is not None or data.content is not None:
@@ -535,24 +573,28 @@ async def update_prd(
     if data.markdown is not None:
         prd.markdown = sanitize_html(data.markdown)
     if data.status is not None:
-        try:
-            prd.status = PRDStatus(data.status)
-        except ValueError:
-            raise AppException(f"Invalid status: {data.status}", code="INVALID_STATUS", status_code=400)
+        prd_sm.transition(prd, data.status)
 
     await db.commit()
     await db.refresh(prd)
 
-    # Trigger incremental compliance check when content changes
+    # Trigger incremental compliance check via Job system
     if data.markdown is not None:
         industry = prd.content.get("industry", "general") if isinstance(prd.content, dict) else "general"
-        background_tasks.add_task(
-            _run_compliance_check,
+        from app.models.job import Job, JobType
+        from app.services.job_runner import enqueue_job
+        job = Job(
+            job_type=JobType.COMPLIANCE_CHECK,
+            status=JobStatus.QUEUED,
+            project_id=prd.project_id,
             prd_id=prd.id,
-            title=prd.title,
-            industry=industry,
-            markdown=prd.markdown or "",
+            triggered_by=user_id,
+            input_data={"title": prd.title, "industry": industry, "markdown_len": len(prd.markdown or "")},
         )
+        db.add(job)
+        await db.commit()
+        await db.refresh(job)
+        await enqueue_job(job.id, db)
 
     # Index PRD content into semantic memory (background task with its own DB session)
     if data.markdown is not None:
@@ -562,6 +604,13 @@ async def update_prd(
             content=data.markdown,
             metadata={"title": prd.title, "project_id": prd.project_id},
         )
+
+    db.add(AuditLog(
+        user_id=user_id, workspace_id=getattr(prd, "workspace_id", None),
+        action="update", resource_type="prd", resource_id=prd.id,
+        summary=f"更新了 PRD {prd.title}",
+    ))
+    await db.commit()
 
     return ResponseBuilder.success({
         "id": prd.id,
@@ -584,13 +633,7 @@ async def delete_prd(
     db: AsyncSession = Depends(get_db)
 ):
     """Delete PRD"""
-    result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = result.scalar_one_or_none()
-
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
 
     prd.soft_delete()
     await db.commit()
@@ -633,12 +676,9 @@ async def generate_prd_stream(
     db: AsyncSession = Depends(get_db),
 ):
     """Stream PRD chapter generation using SSE"""
-    result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = result.scalar_one_or_none()
-
-    if not prd:
+    try:
+        prd = await require_resource_owner(db, PRD, prd_id, user_id)
+    except AppException:
         async def error_stream():
             yield f"data: {json.dumps({'type': 'error', 'message': 'PRD not found'})}\n\n"
         return StreamingResponse(error_stream(), media_type="text/event-stream")
@@ -1064,13 +1104,7 @@ async def export_prd(
     db: AsyncSession = Depends(get_db)
 ):
     """Export PRD in various formats: markdown, json, pdf, docx."""
-    result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = result.scalar_one_or_none()
-
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
 
     if format == "json":
         content = json.dumps(prd.ai_generated, ensure_ascii=False, indent=2)
@@ -1129,13 +1163,7 @@ async def list_prd_versions(
 ):
     """List PRD version history"""
     # Verify PRD ownership
-    prd_result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = prd_result.scalar_one_or_none()
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
-
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
     query = select(PRDVersion).where(PRDVersion.prd_id == prd_id).order_by(desc(PRDVersion.created_at))
     total_result = await db.execute(select(func.count()).select_from(query.subquery()))
     total = total_result.scalar() or 0
@@ -1167,13 +1195,7 @@ async def get_prd_version(
     db: AsyncSession = Depends(get_db)
 ):
     """Get a specific PRD version"""
-    prd_result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = prd_result.scalar_one_or_none()
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
-
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
     result = await db.execute(
         select(PRDVersion).where(PRDVersion.id == version_id, PRDVersion.prd_id == prd_id)
     )
@@ -1200,13 +1222,7 @@ async def restore_prd_version(
     db: AsyncSession = Depends(get_db)
 ):
     """Restore PRD to a specific version"""
-    prd_result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = prd_result.scalar_one_or_none()
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
-
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
     result = await db.execute(
         select(PRDVersion).where(PRDVersion.id == version_id, PRDVersion.prd_id == prd_id)
     )
@@ -1257,13 +1273,7 @@ async def get_generation_progress(
     db: AsyncSession = Depends(get_db),
 ):
     """Get PRD chapter generation progress"""
-    result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = result.scalar_one_or_none()
-
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
 
     chapters = {}
     if prd.content and isinstance(prd.content, dict):
@@ -1302,13 +1312,7 @@ async def diff_prd_versions(
 ):
     """Compare two PRD versions and return unified diff"""
     # Verify PRD ownership
-    prd_result = await db.execute(
-        select(PRD).where(PRD.id == prd_id, PRD.created_by == user_id, PRD.deleted_at.is_(None))
-    )
-    prd = prd_result.scalar_one_or_none()
-    if not prd:
-        raise AppException("PRD not found", code="NOT_FOUND", status_code=404)
-
+    prd = await require_resource_owner(db, PRD, prd_id, user_id)
     # Fetch both versions
     from_result = await db.execute(
         select(PRDVersion).where(

@@ -10,9 +10,6 @@ const EXPORT_FORMATS = [
   { id: "json", name: "JSON", icon: "📄" },
   { id: "pdf", name: "PDF", icon: "📕" },
   { id: "docx", name: "Word", icon: "📘" },
-  { id: "feishu", name: "飞书文档", icon: "📋" },
-  { id: "feishu_card", name: "飞书卡片", icon: "💬" },
-  { id: "wechat_work", name: "企业微信", icon: "💚" },
 ];
 
 export default function ExportPanel({ onExport, onClose }: Props) {

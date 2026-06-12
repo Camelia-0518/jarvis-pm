@@ -3,14 +3,14 @@
 import time
 from typing import Optional, Callable
 from functools import wraps
-from fastapi import Request, HTTPException, status
+from fastapi import Request
 
 from app.core.cache import cache_manager
 from app.core.exceptions import RateLimitError
 
 
 class RateLimiter:
-    """Rate limiter using sliding window algorithm"""
+    """Rate limiter using sliding window algorithm with statistics"""
 
     def __init__(
         self,
@@ -21,10 +21,22 @@ class RateLimiter:
         self.requests = requests
         self.window = window
         self.key_prefix = key_prefix
+        # In-memory statistics (not persisted)
+        self._stats = {"allowed": 0, "rejected": 0}
 
     def _get_key(self, identifier: str) -> str:
         """Generate rate limit key"""
         return f"{self.key_prefix}:{identifier}"
+
+    def get_stats(self) -> dict:
+        """Get rate limiter statistics"""
+        total = self._stats["allowed"] + self._stats["rejected"]
+        return {
+            "allowed": self._stats["allowed"],
+            "rejected": self._stats["rejected"],
+            "total": total,
+            "rejection_rate": round(self._stats["rejected"] / total * 100, 2) if total else 0,
+        }
 
     async def is_allowed(self, identifier: str) -> tuple[bool, dict]:
         """Check if request is allowed"""
@@ -64,11 +76,13 @@ class RateLimiter:
         allowed, info = await self.is_allowed(identifier)
 
         if not allowed:
+            self._stats["rejected"] += 1
             raise RateLimitError(
                 message=f"Rate limit exceeded. Try again in {info['retry_after']} seconds.",
                 retry_after=info["retry_after"]
             )
 
+        self._stats["allowed"] += 1
         return info
 
 
@@ -77,31 +91,49 @@ def rate_limit(
     window: int = 60,
     key_func: Optional[Callable] = None
 ):
-    """Decorator for rate limiting endpoints"""
+    """Decorator for rate limiting endpoints.
+
+    Supports Request object, user_id kwargs, or falls back to skipping.
+    """
     limiter = RateLimiter(requests, window)
 
     def decorator(func: Callable) -> Callable:
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            # Find request in args/kwargs
-            request = None
+            identifier: str | None = None
+
+            # 1. Use custom key function if provided
+            if key_func:
+                for arg in args + tuple(kwargs.values()):
+                    if isinstance(arg, Request):
+                        identifier = key_func(arg)
+                        break
+
+            # 2. Fallback: extract from Request object
+            if identifier is None:
+                for arg in args + tuple(kwargs.values()):
+                    if isinstance(arg, Request):
+                        identifier = _default_key_func(arg)
+                        break
+
+            # 3. Fallback: use user_id from kwargs (FastAPI dependency injection)
+            if identifier is None:
+                user_id = kwargs.get("user_id")
+                if user_id:
+                    identifier = f"user:{user_id}"
+
+            # 4. Fallback: use function name as endpoint-level key
+            if identifier is None:
+                identifier = f"endpoint:{func.__name__}"
+
+            # 5. Check rate limit
+            info = await limiter.check(identifier)
+
+            # Store info on any Request object for response headers
             for arg in args + tuple(kwargs.values()):
                 if isinstance(arg, Request):
-                    request = arg
+                    arg.state.rate_limit_info = info
                     break
-
-            if request:
-                # Get identifier
-                if key_func:
-                    identifier = key_func(request)
-                else:
-                    identifier = _default_key_func(request)
-
-                # Check rate limit
-                info = await limiter.check(identifier)
-
-                # Store info for response headers
-                request.state.rate_limit_info = info
 
             return await func(*args, **kwargs)
         return wrapper

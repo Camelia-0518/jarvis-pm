@@ -38,7 +38,7 @@ export function GlobalSearch() {
           type: "project" as const,
           title: p.name,
           subtitle: p.description || "项目",
-          href: `/workspace?project_id=${p.id}`,
+          href: `/workspace?id=${p.id}`,
         })),
         ...prds.items.map((p) => ({
           id: `prd-${p.id}`,
@@ -185,7 +185,7 @@ export function GlobalSearch() {
         <div className="max-h-[320px] overflow-y-auto py-2">
           {query.trim() && results.length === 0 && !isLoading && (
             <div className="px-4 py-8 text-center text-sm text-slate-400 dark:text-slate-500">
-              未找到与 "{query}" 相关的结果
+              未找到与 &ldquo;{query}&rdquo; 相关的结果
             </div>
           )}
 

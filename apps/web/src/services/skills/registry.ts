@@ -1047,10 +1047,9 @@ interface SkillOutputMap {
 // 从后端加载技能定义，消除前后端重复
 export async function loadSkillDefinitionsFromBackend(): Promise<boolean> {
   try {
-    const res = await fetch('/api/v1/skills/definitions');
-    if (!res.ok) return false;
-    const data = await res.json();
-    const skills: SkillDefinition[] = data?.data?.skills || data?.skills || [];
+    const { skillsApi } = await import("@/lib/api");
+    const result = await skillsApi.getAll();
+    const skills = (result?.skills || []) as unknown as SkillDefinition[];
     if (skills.length > 0) {
       skillRegistry.setSkills(skills);
       return true;

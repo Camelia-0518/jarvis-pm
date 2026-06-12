@@ -8,13 +8,40 @@ Supports:
 - Presence (join/leave)
 """
 
-import json
+
 import asyncio
-from typing import Dict, Set
+from typing import Dict, List, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 import logging
 
+from app.core.security import decode_token
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
+
+
+async def _authenticate_websocket(websocket: WebSocket) -> dict | None:
+    """Extract and validate JWT token from WebSocket query params or headers.
+
+    Returns user payload dict if valid, None if invalid.
+    In single-user mode, allows missing token.
+    """
+    token = websocket.query_params.get("token")
+    if not token:
+        # Try header fallback (some WS clients send headers)
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:]
+
+    if not token:
+        if settings.SINGLE_USER_MODE:
+            return {"sub": "single-user"}
+        return None
+
+    payload = decode_token(token)
+    if payload is None or payload.get("sub") is None:
+        return None
+    return payload
 
 router = APIRouter()
 
@@ -27,15 +54,15 @@ class CollaborationRoom:
         self.connections: Dict[WebSocket, dict] = {}  # ws -> user_info
         self._lock = asyncio.Lock()
 
-    async def add(self, websocket: WebSocket, user_info: dict):
+    async def add(self, websocket: WebSocket, user_info: Dict[str, Any]):
         async with self._lock:
             self.connections[websocket] = user_info
 
-    async def remove(self, websocket: WebSocket) -> dict:
+    async def remove(self, websocket: WebSocket) -> Dict[str, Any]:
         async with self._lock:
             return self.connections.pop(websocket, {})
 
-    def get_users(self) -> list:
+    def get_users(self) -> List[Dict[str, Any]]:
         return [
             {
                 "id": info.get("id"),
@@ -48,11 +75,11 @@ class CollaborationRoom:
             for info in self.connections.values()
         ]
 
-    def update_user_state(self, websocket: WebSocket, state_update: dict):
+    def update_user_state(self, websocket: WebSocket, state_update: Dict[str, Any]):
         if websocket in self.connections:
             self.connections[websocket].update(state_update)
 
-    async def broadcast(self, message: dict, exclude: WebSocket = None):
+    async def broadcast(self, message: Dict[str, Any], exclude: WebSocket = None):
         """Broadcast message to all connected clients in this room"""
         disconnected = []
         for ws in list(self.connections.keys()):
@@ -67,7 +94,7 @@ class CollaborationRoom:
         for ws in disconnected:
             self.connections.pop(ws, None)
 
-    async def send_personal(self, websocket: WebSocket, message: dict):
+    async def send_personal(self, websocket: WebSocket, message: Dict[str, Any]):
         try:
             await websocket.send_json(message)
         except Exception:
@@ -126,12 +153,21 @@ async def collaboration_websocket(
       { "type": "chat", "userId": "...", "userName": "...", "content": "...", "timestamp": 1234567890 }
       { "type": "pong" }
     """
+    # Authenticate before accepting
+    payload = await _authenticate_websocket(websocket)
+    if payload is None:
+        await websocket.close(code=1008, reason="Authentication required")
+        return
+
+    # Use user_id from token (trusted) over URL param (untrusted)
+    trusted_user_id = payload.get("sub", user_id)
+
     # Extract query params
     user_name = websocket.query_params.get("user_name", "Anonymous")
     user_color = websocket.query_params.get("user_color", "#3B82F6")
 
     user_info = {
-        "id": user_id,
+        "id": trusted_user_id,
         "name": user_name,
         "color": user_color,
         "last_seen": 0,
@@ -143,7 +179,7 @@ async def collaboration_websocket(
     await websocket.accept()
     await room.add(websocket, user_info)
 
-    logger.info("User %s joined room %s (total: %d)", user_id, room_id, len(room))
+    logger.info("User %s joined room %s (total: %d)", trusted_user_id, room_id, len(room))
 
     # Send init message with current collaborators
     await room.send_personal(websocket, {
@@ -169,7 +205,7 @@ async def collaboration_websocket(
             now = asyncio.get_event_loop().time()
             if now - last_pong > ping_interval * 2:
                 # Client hasn't responded, close connection
-                logger.warning("Heartbeat timeout for user %s in room %s", user_id, room_id)
+                logger.warning("Heartbeat timeout for user %s in room %s", trusted_user_id, room_id)
                 try:
                     await websocket.close(code=1001)
                 except Exception:
@@ -201,7 +237,7 @@ async def collaboration_websocket(
                 room.update_user_state(websocket, {"cursor": cursor_data})
                 await room.broadcast({
                     "type": "cursor",
-                    "userId": user_id,
+                    "userId": trusted_user_id,
                     "userName": user_name,
                     "color": user_color,
                     "data": cursor_data,
@@ -212,7 +248,7 @@ async def collaboration_websocket(
                 room.update_user_state(websocket, {"selection": selection_data})
                 await room.broadcast({
                     "type": "selection",
-                    "userId": user_id,
+                    "userId": trusted_user_id,
                     "userName": user_name,
                     "color": user_color,
                     "data": selection_data,
@@ -222,7 +258,7 @@ async def collaboration_websocket(
                 update_data = data.get("data", {})
                 await room.broadcast({
                     "type": "update",
-                    "userId": user_id,
+                    "userId": trusted_user_id,
                     "userName": user_name,
                     "data": update_data,
                 }, exclude=websocket)
@@ -232,7 +268,7 @@ async def collaboration_websocket(
                 timestamp = data.get("timestamp", int(asyncio.get_event_loop().time() * 1000))
                 await room.broadcast({
                     "type": "chat",
-                    "userId": user_id,
+                    "userId": trusted_user_id,
                     "userName": user_name,
                     "color": user_color,
                     "content": content,
@@ -253,9 +289,9 @@ async def collaboration_websocket(
                 })
 
     except WebSocketDisconnect:
-        logger.info("User %s disconnected from room %s", user_id, room_id)
+        logger.info("User %s disconnected from room %s", trusted_user_id, room_id)
     except Exception as e:
-        logger.warning("WebSocket error for user %s in room %s: %s", user_id, room_id, e)
+        logger.warning("WebSocket error for user %s in room %s: %s", trusted_user_id, room_id, e)
     finally:
         # Cancel heartbeat
         heartbeat_task.cancel()
@@ -274,4 +310,43 @@ async def collaboration_websocket(
 
         # Cleanup empty room
         room_manager.cleanup_empty(room_id)
-        logger.info("User %s left room %s (remaining: %d)", user_id, room_id, len(room))
+        logger.info("User %s left room %s (remaining: %d)", trusted_user_id, room_id, len(room))
+
+
+# ========== Workflow Progress WebSocket ==========
+
+from app.websocket.manager import websocket_manager
+
+
+@router.websocket("/ws/workflow/{execution_id}")
+async def workflow_progress_websocket(
+    websocket: WebSocket,
+    execution_id: str,
+):
+    """
+    WebSocket endpoint for real-time workflow execution progress.
+
+    URL: ws://host:port/api/v1/ws/workflow/{execution_id}
+
+    Server pushes these message types:
+      { "type": "start", "workflow": "...", "totalSteps": N }
+      { "type": "step_start", "step": N, "step_name": "...", "skill_id": "..." }
+      { "type": "step_complete", "step_name": "...", "output": {...} }
+      { "type": "step_error", "step_name": "...", "error": "..." }
+      { "type": "complete", "outputs": {...} }
+      { "type": "monitoring_update", "data": { "progress_pct": N, "risk_count": N, ... } }
+    """
+    await websocket_manager.connect(websocket, execution_id)
+    try:
+        while True:
+            # Keep connection alive, server pushes events
+            data = await websocket.receive_text()
+            # Client can send "ping" to keep alive
+            if data == "ping":
+                await websocket.send_text('{"type":"pong"}')
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        websocket_manager.disconnect(websocket, execution_id)

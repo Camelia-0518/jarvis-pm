@@ -7,6 +7,7 @@ import NavHeader from "@/components/global/NavHeader";
 import { usePRDStore } from '@/stores/prdStore';
 import { prdApi, toolsApi, aiApi, annotationApi, reviewApi, codeApi, revisionTaskApi, type ChecklistItem, type ChecklistState, type PrototypeSkeleton } from "@/lib/api";
 import { SkeletonText } from "@/components/ui/Skeleton";
+import { devLog, devWarn } from "@/utils/logger";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import ExportPanel from "./ExportPanel";
 import VersionPanel from "./VersionPanel";
@@ -17,6 +18,8 @@ import RevisionTaskPanel from "./RevisionTaskPanel";
 import MarkdownEditor from "./MarkdownEditor";
 import QuickAction from "./QuickAction";
 import ChapterItem from "./ChapterItem";
+import WorkspaceTabs from "./WorkspaceTabs";
+import NextStepCard from "./NextStepCard";
 
 export default function PRDEditor({ params }: { params: { id: string } }) {
   const { content, setContent, isLoading, setIsLoading, isSaving, setIsSaving, autoSaveStatus, setAutoSaveStatus, documentTitle, setDocumentTitle, status, setStatus, projectId, setProjectId, chapters, setChapters, checklistState, setChecklistState, checklistResult, setChecklistResult, aiReviewLoading, setAiReviewLoading, runAIReview } = usePRDStore();
@@ -91,6 +94,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
   const [chapterStatus, setChapterStatus] = useState<Record<string, "pending" | "active" | "done" | "failed">>({});
 
   const contentRef = useRef(content);
+  const reviewRef = useRef<HTMLDivElement>(null);
   useEffect(() => { contentRef.current = content; }, [content]);
 
   // Streaming: queue-based consumption for smooth visual effect
@@ -169,7 +173,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
 
     // Try 3: append a new chapter at end of document if still not found
     if (chapterIdx === -1) {
-      console.log(`[replaceChapterContent] NOT FOUND: title="${chapterTitle}" num="${chapterNum}" — APPENDING at end`);
+      devLog(`[replaceChapterContent] NOT FOUND: title="${chapterTitle}" num="${chapterNum}" — APPENDING at end`);
       const heading = `## ${chapterNum ? chapterNum + ". " : ""}${chapterTitle}`;
       const trimmed = doc.replace(/\s+$/, "");
       return `${trimmed}\n\n${heading}\n\n${newContent}\n`;
@@ -355,17 +359,18 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
               }
             }
           } catch {
-            console.warn("本地草稿数据损坏，已跳过恢复");
+            devWarn("本地草稿数据损坏，已跳过恢复");
           }
         }
       }
     }
     loadPRD();
-  }, [params.id]);
+  }, [params.id, setAutoSaveStatus, setChapters, setContent, setDocumentTitle, setIsLoading, setProjectId, setStatus]);
 
   // Load annotations on mount
   useEffect(() => {
     if (params.id) loadAnnotations();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [params.id]);
 
   // Load review checklist when projectId is available
@@ -380,9 +385,12 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
         const saved = localStorage.getItem(`review-checklist-${projectId}-${params.id}`);
         if (saved) {
           try {
-            setChecklistState(JSON.parse(saved));
+            const parsed = JSON.parse(saved);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+              setChecklistState(parsed);
+            }
           } catch {
-            console.warn("检查清单数据损坏，保留现有状态");
+            devWarn("检查清单数据损坏，保留现有状态");
           }
         }
       } catch (err: unknown) {
@@ -392,7 +400,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
       }
     }
     loadChecklist();
-  }, [projectId, params.id]);
+  }, [projectId, params.id, setChecklistState]);
 
   const handleAIReview = async () => {
     await runAIReview(checklistItems, projectId, params.id);
@@ -425,7 +433,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
       setTimeout(() => setAutoSaveStatus("idle"), 2000);
     }, 30000);
     return () => clearInterval(timer);
-  }, [content, isLoading, params.id]);
+  }, [content, isLoading, params.id, setAutoSaveStatus]);
 
   // Mark dirty on content change (debounced)
   useEffect(() => {
@@ -434,7 +442,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
       setAutoSaveStatus("dirty");
     }, 500);
     return () => clearTimeout(timer);
-  }, [content, isLoading]);
+  }, [content, isLoading, setAutoSaveStatus]);
 
   const handlePublish = async () => {
     setIsPublishing(true);
@@ -692,9 +700,15 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
       const requiredItems = checklistItems.filter((i) => i.required);
       const requiredChecked = requiredItems.filter((i) => checklistState[i.id]?.checked).length;
       if (res.all_required_passed) {
-        setChecklistResult(`?✅ 所有必选项已通过 (${requiredChecked}/${requiredItems.length})`);
+        setChecklistResult(`✅ 所有必选项已通过 (${requiredChecked}/${requiredItems.length})`);
       } else {
         setChecklistResult(`⚠️ 必选项未全部通过 (${requiredChecked}/${requiredItems.length})`);
+        // Prompt to create revision tasks for failed items
+        const failed = checklistItems.filter((i) => i.required && !checklistState[i.id]?.checked);
+        if (failed.length > 0 && confirm) {
+          const ok = await confirm({ message: `有 ${failed.length} 个必选项未通过。是否基于未通过项创建修订任务？`, type: "warning" });
+          if (ok) setShowTaskPanel(true);
+        }
       }
       setTimeout(() => setChecklistResult(null), 5000);
     } catch (err: unknown) {
@@ -755,9 +769,9 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
     let currentDoc = content;
 
     // Debug: log chapters from store vs document headings
-    console.log("[handleRegenerate] chapters from store:", JSON.stringify(chapters.map(c => ({ num: c.num, title: c.title }))));
+    devLog("[handleRegenerate] chapters from store:", JSON.stringify(chapters.map(c => ({ num: c.num, title: c.title }))));
     const docHeadings = content.split("\n").filter(l => /^##\s/.test(l));
-    console.log("[handleRegenerate] doc headings:", JSON.stringify(docHeadings));
+    devLog("[handleRegenerate] doc headings:", JSON.stringify(docHeadings));
 
     // Helper: generate a single chapter with real-time streaming display
     const generateOne = (ch: (typeof chapters)[0]): Promise<string | null> => {
@@ -833,7 +847,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
         if (markdown) {
           const beforeLen = currentDoc.length;
           currentDoc = replaceChapterContent(currentDoc, ch.title, markdown, ch.num);
-          console.log(`[handleRegenerate] Ch ${ch.num} "${ch.title}": markdown=${markdown.length} chars, doc ${beforeLen}→${currentDoc.length}, replaced=${currentDoc.length !== beforeLen}`);
+          devLog(`[handleRegenerate] Ch ${ch.num} "${ch.title}": markdown=${markdown.length} chars, doc ${beforeLen}→${currentDoc.length}, replaced=${currentDoc.length !== beforeLen}`);
           setContent(currentDoc);
           setChapterStatus((prev) => ({ ...prev, [ch.num]: "done" }));
         } else {
@@ -854,8 +868,8 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
       }
     }
 
-    console.log("[handleRegenerate] DONE. currentDoc length:", currentDoc.length);
-    console.log("[handleRegenerate] first 500 chars:", currentDoc.slice(0, 500));
+    devLog("[handleRegenerate] DONE. currentDoc length:", currentDoc.length);
+    devLog("[handleRegenerate] first 500 chars:", currentDoc.slice(0, 500));
     if (failedList.length > 0) {
       setAiMessage(
         `重新生成完成，第 ${failedList.join(", ")} 章生成失败，可点击左侧"重试"按钮单独生成`
@@ -1122,6 +1136,12 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
           📤
         </button>
         <button
+          onClick={() => setShowTaskPanel(!showTaskPanel)}
+          className="rounded-lg border px-2.5 py-1.5 text-sm font-medium transition-colors duration-150 md:hidden border-slate-300 text-slate-700 hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+        >
+          📋
+        </button>
+        <button
           onClick={() => setShowExportPanel(!showExportPanel)}
           className={`rounded-lg border px-2.5 md:px-3 py-1.5 text-sm font-medium transition-colors duration-150 ${
             showExportPanel
@@ -1163,7 +1183,27 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
           >
             {status === "published" ? "已发布" : "草稿"}
           </span>
+          <div className="ml-auto flex items-center gap-2 text-xs text-slate-400">
+            <span className="hidden sm:inline">可见范围：{projectId ? "工作区成员" : "仅自己"}</span>
+          </div>
         </div>
+
+        {/* Next step recommendation */}
+        {!isLoading && (
+          <div className="mx-auto max-w-7xl px-1 pb-2">
+            <NextStepCard
+              hasUnfinishedChecklist={(checklistItems || []).some((i) => i.required && !(checklistState || {})[i.id]?.checked)}
+              openAnnotations={annotationStats?.open || 0}
+              activeTaskCount={(taskStats?.todo || 0) + (taskStats?.in_progress || 0)}
+              hasFailedReReview={(tasks || []).some((t) => t.re_review_status === "fail" || t.re_review_status === "partial" || t.re_review_status === "pending")}
+              prdStatus={status || ""}
+              projectId={projectId}
+              onScrollToReview={() => { reviewRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }); }}
+              onOpenAnnotations={() => setShowAnnotationPanel(true)}
+              onOpenTasks={() => setShowTaskPanel(true)}
+            />
+          </div>
+        )}
       </div>
 
       {/* Editor */}
@@ -1424,6 +1464,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
           </div>
 
           {/* Review Checklist */}
+          <div ref={reviewRef}>
           <ReviewPanel
             items={checklistItems}
             state={checklistState}
@@ -1436,6 +1477,7 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
             onAIReview={handleAIReview}
             onSubmit={handleSubmitChecklist}
           />
+          </div>
 
           {/* Chapter Navigation */}
           <div className="mt-6">
@@ -1563,6 +1605,22 @@ export default function PRDEditor({ params }: { params: { id: string } }) {
               />
             )}
           </div>
+
+          {/* Right workspace tabs — persistent on desktop, toggle on mobile */}
+          {showTaskPanel && (
+            <div className="fixed inset-0 z-30 bg-black/20 md:hidden" onClick={() => setShowTaskPanel(false)} />
+          )}
+          <aside className={`${showTaskPanel ? "fixed right-0 top-0 z-40 h-full w-80 shadow-xl" : "hidden"} md:relative md:block md:w-80 shrink-0 bg-white dark:bg-gray-900`}>
+            <WorkspaceTabs
+              prdId={params.id}
+              projectId={projectId || ""}
+              markdown={content || ""}
+              versions={versions}
+              annotations={annotations}
+              onRefreshAnnotations={loadAnnotations}
+              onRefreshTasks={loadTasks}
+            />
+          </aside>
         </main>
       </div>
     </div>

@@ -81,7 +81,7 @@ async def seed_builtin_prompts(db: AsyncSession) -> None:
     for name, data in BUILTIN_PROMPTS.items():
         # Check if any version exists for this prompt name
         existing = await db.execute(
-            select(PromptTemplate).where(PromptTemplate.name == name)
+            select(PromptTemplate).where(PromptTemplate.name == name, PromptTemplate.deleted_at.is_(None))
         )
         if existing.scalar_one_or_none():
             continue  # Skip if already seeded

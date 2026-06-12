@@ -10,7 +10,7 @@ import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 from typing import Dict, Any, Optional
-from .base import BaseTool, ToolResult
+from .base import ToolResult
 from .registry import ToolRegistry
 
 

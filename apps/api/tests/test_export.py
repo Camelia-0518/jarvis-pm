@@ -89,7 +89,7 @@ async def test_export_prd_pdf_error(async_client: AsyncClient, sample_prd: PRD):
     """PDF export failure should return EXPORT_ERROR, not crash."""
     with patch("app.api.v1.endpoints.prds._markdown_to_pdf", side_effect=Exception("font missing")):
         response = await async_client.get(f"/api/v1/prds/{sample_prd.id}/export?format=pdf")
-        assert response.status_code == 200
+        assert response.status_code == 500
 
         data = response.json()
         assert data["success"] is False
@@ -123,7 +123,7 @@ async def test_export_prd_docx_error(async_client: AsyncClient, sample_prd: PRD)
     """DOCX export failure should return EXPORT_ERROR."""
     with patch("app.api.v1.endpoints.prds._markdown_to_docx", side_effect=Exception("docx lib missing")):
         response = await async_client.get(f"/api/v1/prds/{sample_prd.id}/export?format=docx")
-        assert response.status_code == 200
+        assert response.status_code == 500
 
         data = response.json()
         assert data["success"] is False
@@ -148,7 +148,7 @@ async def test_export_default_format(async_client: AsyncClient, sample_prd: PRD)
 async def test_export_nonexistent_prd(async_client: AsyncClient):
     """GET /api/v1/prds/{nonexistent}/export should return NOT_FOUND."""
     response = await async_client.get("/api/v1/prds/non-existent-id/export?format=markdown")
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False

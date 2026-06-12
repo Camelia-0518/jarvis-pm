@@ -17,6 +17,7 @@ async def get_active_prompt(db: AsyncSession, name: str, default: Optional[str] 
         select(PromptTemplate).where(
             PromptTemplate.name == name,
             PromptTemplate.is_active == True,
+            PromptTemplate.deleted_at.is_(None),
         )
     )
     prompt = result.scalar_one_or_none()
@@ -41,6 +42,7 @@ async def get_prompt_with_fallback(
         select(PromptTemplate).where(
             PromptTemplate.name == name,
             PromptTemplate.is_active == True,
+            PromptTemplate.deleted_at.is_(None),
         )
     )
     prompt = result.scalar_one_or_none()

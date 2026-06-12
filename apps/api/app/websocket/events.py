@@ -2,7 +2,7 @@
 import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
-from typing import Optional
+
 from .manager import websocket_manager
 
 

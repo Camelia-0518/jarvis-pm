@@ -6,10 +6,12 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.security import get_current_user_id
 from app.core.responses import ResponseBuilder
-from app.core.exceptions import ResourceNotFoundError, ResourceConflictError
+from app.core.exceptions import ResourceNotFoundError
 from app.services.prompt_service import PromptService
+from app.models.audit_log import AuditLog
 
 router = APIRouter()
 
@@ -45,6 +47,7 @@ class PromptResponse(BaseModel):
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("", response_model=dict)
 async def list_prompts(
     name: Optional[str] = Query(None),
@@ -57,7 +60,7 @@ async def list_prompts(
 ):
     """List prompt templates with filtering"""
     prompts, total = await PromptService.list_prompts(
-        db, name=name, tag=tag, is_active=is_active, page=page, limit=limit
+        db, name=name, tag=tag, is_active=is_active, page=page, limit=limit, user_id=user_id
     )
     return ResponseBuilder.paginated(
         data=[p.to_dict() for p in prompts],
@@ -67,6 +70,7 @@ async def list_prompts(
     )
 
 
+@rate_limit(requests=30, window=60)
 @router.post("", response_model=dict, status_code=status.HTTP_201_CREATED)
 async def create_prompt(
     data: PromptCreateRequest,
@@ -83,9 +87,15 @@ async def create_prompt(
         tags=data.tags,
         user_id=user_id,
     )
+    db.add(AuditLog(
+        user_id=user_id, action="create", resource_type="prompt",
+        resource_id=prompt.id, summary=f"创建了提示词 {prompt.name}",
+    ))
+    await db.commit()
     return ResponseBuilder.created(prompt.to_dict())
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/{prompt_id}", response_model=dict)
 async def get_prompt(
     prompt_id: str,
@@ -99,6 +109,7 @@ async def get_prompt(
     return ResponseBuilder.success(prompt.to_dict())
 
 
+@rate_limit(requests=30, window=60)
 @router.put("/{prompt_id}", response_model=dict)
 async def update_prompt(
     prompt_id: str,
@@ -113,6 +124,7 @@ async def update_prompt(
     return ResponseBuilder.success(prompt.to_dict())
 
 
+@rate_limit(requests=20, window=60)
 @router.delete("/{prompt_id}", response_model=dict)
 async def delete_prompt(
     prompt_id: str,
@@ -121,9 +133,15 @@ async def delete_prompt(
 ):
     """Delete a prompt version"""
     await PromptService.delete_prompt(db, prompt_id)
+    db.add(AuditLog(
+        user_id=user_id, action="delete", resource_type="prompt",
+        resource_id=prompt_id, summary=f"删除了提示词 {prompt_id}",
+    ))
+    await db.commit()
     return ResponseBuilder.no_content("Prompt deleted successfully")
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/{prompt_id}/activate", response_model=dict)
 async def activate_prompt(
     prompt_id: str,
@@ -135,6 +153,7 @@ async def activate_prompt(
     return ResponseBuilder.success(prompt.to_dict())
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/by-name/{name}/versions", response_model=dict)
 async def list_prompt_versions(
     name: str,

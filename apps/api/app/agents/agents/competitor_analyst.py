@@ -17,7 +17,6 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from ..base import BaseAgent, AgentResult, AgentState
-from ..llm_client import create_default_client
 from ..tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -53,13 +52,10 @@ class CompetitorAnalyst(BaseAgent):
 输出结构化报告，使用 Markdown 格式。"""
 
     def __init__(self, llm_client=None, **kwargs):
-        super().__init__(
-            llm_client=llm_client or create_default_client(),
-            **kwargs
-        )
+        super().__init__(llm_client=llm_client, **kwargs)
         self.tool_registry = ToolRegistry()
 
-    async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
         """
         执行竞品分析（步骤1：搜索/推断竞品）
 
@@ -74,66 +70,52 @@ class CompetitorAnalyst(BaseAgent):
                 - 正常模式: output=完整报告, data.needs_confirmation=False
                 - 候选模式: output=候选提示, data.needs_confirmation=True, data.candidates=候选列表
         """
-        start_time = datetime.now()
-        self._set_state(AgentState.RUNNING)
+        product_name = input_data.get("product_name", "")
+        industry = input_data.get("industry", "")
+        keywords = input_data.get("keywords", [])
 
-        try:
-            product_name = input_data.get("product_name", "")
-            industry = input_data.get("industry", "")
-            keywords = input_data.get("keywords", [])
+        # 步骤1: 搜索竞品
+        step1 = self._create_step("search_competitors", "搜索竞品")
+        competitors = await self._search_competitors(
+            product_name, industry, keywords
+        )
+        self._complete_step(step1, f"找到 {len(competitors)} 个竞品")
 
-            # 步骤1: 搜索竞品
-            step1 = self._create_step("search_competitors", "搜索竞品")
-            competitors = await self._search_competitors(
-                product_name, industry, keywords
-            )
-            self._complete_step(step1, f"找到 {len(competitors)} 个竞品")
+        # 区分已验证和候选竞品
+        verified = [c for c in competitors if c.get("source") == "web_search"]
+        candidates = [c for c in competitors if c.get("source") == "llm_inferred"]
 
-            # 区分已验证和候选竞品
-            verified = [c for c in competitors if c.get("source") == "web_search"]
-            candidates = [c for c in competitors if c.get("source") == "llm_inferred"]
-
-            # 如果存在候选竞品（LLM推断），进入用户确认模式
-            if candidates:
-                self._set_state(AgentState.WAITING_FOR_INPUT)
-                candidate_preview = self._generate_candidate_preview(
-                    product_name=product_name,
-                    industry=industry,
-                    verified=verified,
-                    candidates=candidates
-                )
-                return AgentResult(
-                    success=True,
-                    output=candidate_preview,
-                    data={
-                        "needs_confirmation": True,
-                        "verified_count": len(verified),
-                        "candidates": candidates,
-                        "verified": verified,
-                        "product_name": product_name,
-                        "industry": industry,
-                        "keywords": keywords,
-                        "message": "检测到以下竞品基于 LLM 推断生成，请勾选确认后再生成正式报告。",
-                    },
-                    execution_time=(datetime.now() - start_time).total_seconds()
-                )
-
-            # 全部已验证 -> 直接生成完整报告
-            return await self._generate_full_report(
+        # 如果存在候选竞品（LLM推断），进入用户确认模式
+        if candidates:
+            self._set_state(AgentState.WAITING_FOR_INPUT)
+            candidate_preview = self._generate_candidate_preview(
                 product_name=product_name,
                 industry=industry,
-                competitors=competitors,
-                start_time=start_time
+                verified=verified,
+                candidates=candidates
             )
-
-        except Exception as e:
-            self._set_state(AgentState.FAILED)
             return AgentResult(
-                success=False,
-                error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
+                success=True,
+                output=candidate_preview,
+                data={
+                    "needs_confirmation": True,
+                    "verified_count": len(verified),
+                    "candidates": candidates,
+                    "verified": verified,
+                    "product_name": product_name,
+                    "industry": industry,
+                    "keywords": keywords,
+                    "message": "检测到以下竞品基于 LLM 推断生成，请勾选确认后再生成正式报告。",
+                },
+                execution_time=self.elapsed_seconds
             )
 
+        # 全部已验证 -> 直接生成完整报告
+        return await self._generate_full_report(
+            product_name=product_name,
+            industry=industry,
+            competitors=competitors
+        )
     async def confirm_competitors(
         self,
         product_name: str,
@@ -155,7 +137,6 @@ class CompetitorAnalyst(BaseAgent):
         Returns:
             AgentResult: 完整竞品分析报告
         """
-        start_time = datetime.now()
         self._set_state(AgentState.RUNNING)
 
         try:
@@ -163,17 +144,17 @@ class CompetitorAnalyst(BaseAgent):
             all_competitors = verified + confirmed_candidates
 
             if not all_competitors:
+                self._set_state(AgentState.FAILED)
                 return AgentResult(
                     success=False,
                     error="没有可用的竞品数据，请至少确认一个竞品。",
-                    execution_time=(datetime.now() - start_time).total_seconds()
+                    execution_time=self.elapsed_seconds
                 )
 
             return await self._generate_full_report(
                 product_name=product_name,
                 industry=industry,
-                competitors=all_competitors,
-                start_time=start_time
+                competitors=all_competitors
             )
 
         except Exception as e:
@@ -181,7 +162,7 @@ class CompetitorAnalyst(BaseAgent):
             return AgentResult(
                 success=False,
                 error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
+                execution_time=self.elapsed_seconds
             )
 
     async def _generate_full_report(
@@ -189,12 +170,8 @@ class CompetitorAnalyst(BaseAgent):
         product_name: str,
         industry: str,
         competitors: List[Dict[str, Any]],
-        start_time: Optional[datetime] = None
     ) -> AgentResult:
         """生成完整竞品分析报告"""
-        if start_time is None:
-            start_time = datetime.now()
-
         # 步骤2: 获取竞品详情
         step2 = self._create_step("analyze_details", "分析竞品详情")
         detailed_analysis = []
@@ -218,9 +195,6 @@ class CompetitorAnalyst(BaseAgent):
         )
         self._complete_step(step4, f"报告长度: {len(report)} 字符")
 
-        execution_time = (datetime.now() - start_time).total_seconds()
-        self._set_state(AgentState.COMPLETED)
-
         return AgentResult(
             success=True,
             output=report,
@@ -231,7 +205,7 @@ class CompetitorAnalyst(BaseAgent):
                 "needs_confirmation": False,
                 "confirmed": True,
             },
-            execution_time=execution_time
+            execution_time=self.elapsed_seconds
         )
 
     async def _search_competitors(
@@ -262,15 +236,8 @@ class CompetitorAnalyst(BaseAgent):
                         for item in result.data.get("results", []):
                             item["source"] = "web_search"
                             competitors.append(item)
-                except Exception as e:
-                    logger.error(f"Search error: {e}")
-
-        # 如果搜索失败或没有工具，让 LLM 基于已知信息推断竞品
-        if not competitors:
-            inferred = await self._llm_analyze_competitors(product_name, industry, keywords)
-            for item in inferred:
-                item["source"] = "llm_inferred"
-                competitors.append(item)
+                except Exception:
+                    pass
 
         return competitors
 
@@ -313,7 +280,7 @@ URL: {url}
             analysis = json.loads(response)
             details.update(analysis)
         except Exception:
-            pass
+            logger.warning("Failed to parse competitor analysis from LLM output", exc_info=True)
 
         return details
 

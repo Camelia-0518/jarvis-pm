@@ -10,11 +10,10 @@ import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from datetime import datetime
 
 from ..base import BaseAgent, AgentResult, AgentState
-from ..llm_client import create_default_client
 
 
 class ReviewPreparer(BaseAgent):
@@ -47,13 +46,7 @@ class ReviewPreparer(BaseAgent):
 
 输出结构化的评审材料。"""
 
-    def __init__(self, llm_client=None, **kwargs):
-        super().__init__(
-            llm_client=llm_client or create_default_client(),
-            **kwargs
-        )
-
-    async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
         """
         执行评审准备
 
@@ -63,80 +56,65 @@ class ReviewPreparer(BaseAgent):
         Returns:
             AgentResult: 包含评审材料
         """
-        start_time = datetime.now()
-        self._set_state(AgentState.RUNNING)
+        product_name = input_data.get("product_name", "")
+        prd_content = input_data.get("prd_content", "")
+        analysis_results = input_data.get("analysis_results", {})
+        competitor_analysis = input_data.get("competitor_analysis", "")
+        compliance_report = input_data.get("compliance_report", "")
 
-        try:
-            product_name = input_data.get("product_name", "")
-            prd_content = input_data.get("prd_content", "")
-            analysis_results = input_data.get("analysis_results", {})
-            competitor_analysis = input_data.get("competitor_analysis", "")
-            compliance_report = input_data.get("compliance_report", "")
+        # 步骤1: 汇总材料
+        step1 = self._create_step("material_summary", "汇总评审材料")
+        materials = self._summarize_materials(
+            product_name, prd_content, analysis_results,
+            competitor_analysis, compliance_report
+        )
+        self._complete_step(step1, f"汇总 {len(materials)} 类材料")
 
-            # 步骤1: 汇总材料
-            step1 = self._create_step("material_summary", "汇总评审材料")
-            materials = self._summarize_materials(
-                product_name, prd_content, analysis_results,
-                competitor_analysis, compliance_report
-            )
-            self._complete_step(step1, f"汇总 {len(materials)} 类材料")
+        # 步骤2: 风险分析
+        step2 = self._create_step("risk_analysis", "风险分析")
+        risks = await self._analyze_risks(
+            product_name, prd_content, compliance_report
+        )
+        self._complete_step(step2, f"识别 {len(risks)} 个风险点")
 
-            # 步骤2: 风险分析
-            step2 = self._create_step("risk_analysis", "风险分析")
-            risks = await self._analyze_risks(
-                product_name, prd_content, compliance_report
-            )
-            self._complete_step(step2, f"识别 {len(risks)} 个风险点")
+        # 步骤3: 预设问答
+        step3 = self._create_step("prepare_qa", "预设问答")
+        qa_list = await self._prepare_qa(
+            product_name, prd_content, analysis_results
+        )
+        self._complete_step(step3, f"准备 {len(qa_list)} 个问答")
 
-            # 步骤3: 预设问答
-            step3 = self._create_step("prepare_qa", "预设问答")
-            qa_list = await self._prepare_qa(
-                product_name, prd_content, analysis_results
-            )
-            self._complete_step(step3, f"准备 {len(qa_list)} 个问答")
+        # 步骤4: 决策建议
+        step4 = self._create_step("decision_recommendation", "决策建议")
+        recommendation = self._generate_recommendation(
+            materials, risks, qa_list
+        )
+        self._complete_step(step4, f"建议: {recommendation['decision']}")
 
-            # 步骤4: 决策建议
-            step4 = self._create_step("decision_recommendation", "决策建议")
-            recommendation = self._generate_recommendation(
-                materials, risks, qa_list
-            )
-            self._complete_step(step4, f"建议: {recommendation['decision']}")
+        # 步骤5: 生成评审材料
+        step5 = self._create_step("generate_materials", "生成评审材料")
+        review_package = self._generate_review_package(
+            product_name=product_name,
+            materials=materials,
+            risks=risks,
+            qa_list=qa_list,
+            recommendation=recommendation
+        )
+        self._complete_step(step5, "评审材料生成完成")
 
-            # 步骤5: 生成评审材料
-            step5 = self._create_step("generate_materials", "生成评审材料")
-            review_package = self._generate_review_package(
-                product_name=product_name,
-                materials=materials,
-                risks=risks,
-                qa_list=qa_list,
-                recommendation=recommendation
-            )
-            self._complete_step(step5, "评审材料生成完成")
-
-            execution_time = (datetime.now() - start_time).total_seconds()
-            self._set_state(AgentState.COMPLETED)
-
-            return AgentResult(
-                success=True,
-                output=review_package,
-                data={
-                    "product_name": product_name,
-                    "material_count": len(materials),
-                    "risk_count": len(risks),
-                    "qa_count": len(qa_list),
-                    "recommendation": recommendation,
-                    "package_length": len(review_package)
-                },
-                execution_time=execution_time
-            )
-
-        except Exception as e:
-            self._set_state(AgentState.FAILED)
-            return AgentResult(
-                success=False,
-                error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
-            )
+        return AgentResult(
+            success=True,
+            output=review_package,
+            data={
+                "product_name": product_name,
+                "material_count": len(materials),
+                "risk_count": len(risks),
+                "qa_count": len(qa_list),
+                "recommendation": recommendation,
+                "package_length": len(review_package)
+            },
+            execution_time=self.elapsed_seconds
+        )
 
     def _summarize_materials(
         self,

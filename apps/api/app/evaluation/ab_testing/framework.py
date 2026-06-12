@@ -88,7 +88,7 @@ class ABTest(BaseModel):
         """
         # 生成一致性哈希
         hash_input = f"{self.id}:{user_id}"
-        hash_value = int(hashlib.md5(hash_input.encode()).hexdigest(), 16)
+        hash_value = int(hashlib.sha256(hash_input.encode()).hexdigest(), 16)
 
         # 根据流量分配决定变体
         if (hash_value % 100) < (self.traffic_split * 100):

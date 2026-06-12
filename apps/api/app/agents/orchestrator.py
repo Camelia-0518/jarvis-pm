@@ -7,6 +7,7 @@ Agent 编排层
 参考 LangChain LCEL 模式
 """
 
+import logging
 import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
@@ -17,7 +18,9 @@ from enum import Enum, auto
 from datetime import datetime
 from uuid import uuid4
 
-from .base import BaseAgent, AgentResult, AgentState
+from .base import BaseAgent, AgentResult
+
+logger = logging.getLogger(__name__)
 
 
 class ChainStepType(Enum):
@@ -163,9 +166,8 @@ class AgentOrchestrator:
 
         # 将初始输入放入上下文
         context.update(initial_input)
-
-        start_time = datetime.now()
         final_result: Optional[AgentResult] = None
+        started_at = datetime.now()
 
         for step in steps:
             step_result = await self._execute_step(step, context, on_step_complete)
@@ -173,9 +175,6 @@ class AgentOrchestrator:
 
             if not step_result.success and step.on_error == "stop":
                 break
-
-        execution_time = (datetime.now() - start_time).total_seconds()
-
         if final_result is None:
             return AgentResult(success=False, error="链执行未产生结果")
 
@@ -184,7 +183,7 @@ class AgentOrchestrator:
             output=final_result.output,
             data={**final_result.data, "context": context.to_dict()},
             error=final_result.error,
-            execution_time=execution_time,
+            execution_time=(datetime.now() - started_at).total_seconds(),
         )
 
     async def _execute_step(
@@ -268,7 +267,7 @@ class AgentOrchestrator:
             try:
                 on_step_complete(step.name, result)
             except Exception:
-                pass
+                logger.warning("Step callback failed for step: %s", step.name, exc_info=True)
 
         result.execution_time = (datetime.now() - step_start).total_seconds()
         return result
@@ -376,71 +375,3 @@ def create_prd_workflow_chain(
     return chain_name
 
 
-def create_battle_chain(
-    orchestrator: AgentOrchestrator,
-    research_agent: BaseAgent,
-    competitor_agent: BaseAgent,
-    prd_agent: BaseAgent,
-    review_agent: BaseAgent,
-) -> str:
-    """
-    创建 Battle 5天冲刺 Chain
-
-    流程：用户研究 + 竞品分析（并行） -> PRD生成 -> 评审准备
-    """
-    chain_name = "battle_5day"
-
-    # Day 1 & 2 并行
-    parallel_step = ChainStep(
-        id=str(uuid4()),
-        name="研究阶段",
-        step_type=ChainStepType.PARALLEL,
-        parallel_steps=[
-            ChainStep(
-                id=str(uuid4()),
-                name="用户研究",
-                step_type=ChainStepType.AGENT,
-                agent=research_agent,
-                input_map={"project_info": "project_info"},
-                output_map="research_result",
-            ),
-            ChainStep(
-                id=str(uuid4()),
-                name="竞品分析",
-                step_type=ChainStepType.AGENT,
-                agent=competitor_agent,
-                input_map={"project_info": "project_info"},
-                output_map="competitor_result",
-            ),
-        ],
-        input_map={"project_info": "project_info"},
-        output_map="research_phase",
-    )
-
-    steps = [
-        parallel_step,
-        ChainStep(
-            id=str(uuid4()),
-            name="PRD框架生成",
-            step_type=ChainStepType.AGENT,
-            agent=prd_agent,
-            input_map={
-                "project_info": "project_info",
-                "research": "research_phase",
-            },
-            output_map="prd_result",
-            on_error="stop",
-        ),
-        ChainStep(
-            id=str(uuid4()),
-            name="评审准备",
-            step_type=ChainStepType.AGENT,
-            agent=review_agent,
-            input_map={"prd": "prd_result"},
-            output_map="review_result",
-            on_error="continue",
-        ),
-    ]
-
-    orchestrator.define_chain(chain_name, steps)
-    return chain_name

@@ -6,12 +6,11 @@ from sqlalchemy.sql import func
 import uuid
 
 from app.core.database import Base
+from app.models.mixins import SoftDeleteMixin, TimestampMixin
 
-
-class Requirement(Base):
+class Requirement(Base, SoftDeleteMixin, TimestampMixin):
     __tablename__ = "requirements"
 
-    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     project_id = Column(String, ForeignKey("projects.id"), nullable=False, index=True)
     created_by = Column(String, ForeignKey("users.id"))
 
@@ -30,5 +29,5 @@ class Requirement(Base):
     # Kano model
     kano_category = Column(String, default="")  # must_be, one_dimensional, attractive, indifferent, reverse
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+

@@ -175,7 +175,7 @@ async def test_update_annotation_not_found(async_client: AsyncClient, sample_prd
         f"/api/v1/prds/{sample_prd.id}/annotations/non-existent-id",
         json=payload,
     )
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code == 404  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False
@@ -195,11 +195,13 @@ async def test_delete_annotation_success(async_client: AsyncClient, sample_annot
     data = response.json()
     assert data["success"] is True
 
-    # Verify deletion
+    # Verify soft deletion — record still exists but deleted_at is set
     result = await db_session.execute(
         select(PRDAnnotation).where(PRDAnnotation.id == sample_annotation.id)
     )
-    assert result.scalar_one_or_none() is None
+    annotation = result.scalar_one_or_none()
+    assert annotation is not None
+    assert annotation.deleted_at is not None
 
 
 @pytest.mark.integration
@@ -208,7 +210,7 @@ async def test_delete_annotation_not_found(async_client: AsyncClient, sample_prd
     response = await async_client.delete(
         f"/api/v1/prds/{sample_prd.id}/annotations/non-existent-id"
     )
-    assert response.status_code == 200  # Endpoint returns 200 with error body
+    assert response.status_code in (400, 404)  # Returns proper HTTP error status
 
     data = response.json()
     assert data["success"] is False

@@ -6,7 +6,7 @@ Obsidian 知识库加载器
 """
 
 import logging
-import os
+
 from pathlib import Path
 from typing import Optional, List, Any
 

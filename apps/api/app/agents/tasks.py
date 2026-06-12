@@ -13,14 +13,14 @@ import logging
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import asyncio
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable
 from uuid import UUID, uuid4
 from datetime import datetime
-from dataclasses import dataclass, field
-from enum import Enum, auto
+from dataclasses import dataclass
+from enum import Enum
 
-from .base import AgentResult, AgentState
-from .manager import AgentManager, TaskRecord
+from .base import AgentResult
+from .manager import AgentManager
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +45,20 @@ class QueuedTask:
     status: str = "pending"
     result: Optional[AgentResult] = None
     error: Optional[str] = None
+    progress_updates: List[Dict[str, Any]] = None
+
+    def __post_init__(self):
+        if self.progress_updates is None:
+            self.progress_updates = []
+
+    def add_progress(self, step: str, message: str, data: Dict[str, Any] = None):
+        """添加进度更新"""
+        self.progress_updates.append({
+            "step": step,
+            "message": message,
+            "timestamp": datetime.now().isoformat(),
+            "data": data or {},
+        })
 
 
 class TaskQueue:
@@ -90,6 +104,9 @@ class TaskQueue:
         # 等待工作器完成
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers = []
+
+        # 清理已完成的 Agent 实例
+        self._manager.cleanup()
 
     async def submit(
         self,
@@ -168,6 +185,7 @@ class TaskQueue:
             return
 
         task.status = "running"
+        task.add_progress("started", "任务开始执行")
 
         try:
             # 创建 Agent 实例
@@ -185,6 +203,22 @@ class TaskQueue:
             task.status = "completed" if record.result and record.result.success else "failed"
             task.error = record.error
 
+            # 提取执行步骤信息作为进度
+            steps_info = []
+            if record.result and record.result.metadata:
+                steps_info = record.result.metadata.get("steps_completed", 0)
+                mode = record.result.metadata.get("mode", "full")
+                task.add_progress(
+                    "completed",
+                    f"任务完成（{mode} 模式）",
+                    {
+                        "steps_completed": steps_info,
+                        "mode": mode,
+                        "execution_time": record.result.execution_time,
+                        "evaluated": record.result.metadata.get("evaluated", False),
+                    }
+                )
+
             # 触发回调
             if task.callback:
                 try:
@@ -198,6 +232,7 @@ class TaskQueue:
         except Exception as e:
             task.status = "failed"
             task.error = str(e)
+            task.add_progress("failed", f"任务失败: {str(e)}")
 
     def get_stats(self) -> Dict[str, Any]:
         """获取队列统计"""

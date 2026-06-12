@@ -4,9 +4,9 @@
 确保所有技能输出格式统一
 """
 
-from typing import Dict, Any, List, Type, Optional
+from typing import Dict, Any, List
 from pydantic import BaseModel, Field, ValidationError
-from datetime import datetime
+
 
 
 # ============ 需求分析输出Schema ============
@@ -319,43 +319,12 @@ class OutputValidator:
                 }
 
         elif skill_id == "write-prd":
-            # 如果有 raw_response（JSON解析失败），智能提取内容
-            if "raw_response" in fixed and fixed["raw_response"]:
-                import re, json
-                raw = fixed["raw_response"]
-
-                # 第一步：尝试从 raw_response 中解析 JSON（LLM可能返回了JSON但被截断）
-                parsed_from_raw = None
-                # 尝试提取 json 代码块并解析
-                json_match = re.search(r'```(?:json)?\s*([\s\S]*?)```', raw)
-                if json_match:
-                    try:
-                        parsed_from_raw = json.loads(json_match.group(1).strip())
-                    except json.JSONDecodeError:
-                        pass
-                # 如果没有代码块，尝试直接解析整个文本
-                if not parsed_from_raw:
-                    try:
-                        parsed_from_raw = json.loads(raw.strip())
-                    except json.JSONDecodeError:
-                        pass
-
-                # 如果成功解析出 JSON，提取结构化字段
-                if parsed_from_raw and isinstance(parsed_from_raw, dict):
-                    raw_title = parsed_from_raw.get("title", "")
-                    # 过滤异常 title（如单个括号字符）
-                    if raw_title and len(raw_title) > 2 and raw_title not in ("{", "[", "}", "]"):
-                        fixed["title"] = raw_title
-                    if not fixed.get("version") and parsed_from_raw.get("version"):
-                        fixed["version"] = parsed_from_raw["version"]
-                    if not fixed.get("sections") and parsed_from_raw.get("sections"):
-                        fixed["sections"] = parsed_from_raw["sections"]
-                    # markdown 字段放概述或提示
-                    if not fixed.get("markdown") and parsed_from_raw.get("markdown"):
-                        fixed["markdown"] = parsed_from_raw["markdown"]
-
-                # 第二步：如果 JSON 解析失败或 title 异常，按 markdown 逻辑提取
-                if not parsed_from_raw or not fixed.get("title"):
+            # 确保 markdown 字段存在（write-prd 现在直接返回 markdown）
+            if "markdown" not in fixed or not fixed["markdown"]:
+                # 尝试从 raw_response 回退提取
+                raw = fixed.get("raw_response", "")
+                if raw:
+                    import re
                     md_match = re.search(r'```markdown\s*([\s\S]*?)```', raw)
                     if md_match:
                         fixed["markdown"] = md_match.group(1).strip()
@@ -365,27 +334,25 @@ class OutputValidator:
                             fixed["markdown"] = code_match.group(1).strip()
                         else:
                             fixed["markdown"] = raw.strip()
-                    # 尝试提取标题
-                    if not fixed.get("title"):
-                        title_match = re.search(r'^#\s+(.+)$', fixed.get("markdown", ""), re.MULTILINE)
-                        if title_match:
-                            fixed["title"] = title_match.group(1).strip()
-                        else:
-                            lines = [l.strip() for l in fixed["markdown"].split('\n') if l.strip()]
-                            if lines:
-                                fixed["title"] = lines[0][:100]
+                else:
+                    fixed["markdown"] = ""
 
-            # 确保有markdown字段（如果没有且sections存在，从sections生成）
-            if ("markdown" not in fixed or not fixed["markdown"]) and fixed.get("sections"):
-                sections = fixed.get("sections", [])
-                markdown_lines = [f"# {fixed.get('title', 'PRD Document')}", ""]
-                for section in sections:
-                    if isinstance(section, dict):
-                        markdown_lines.append(f"## {section.get('title', '')}")
-                        markdown_lines.append("")
-                        markdown_lines.append(section.get('content', ''))
-                        markdown_lines.append("")
-                fixed["markdown"] = "\n".join(markdown_lines)
+            # 确保 title 存在
+            if "title" not in fixed or not fixed["title"]:
+                import re
+                title_match = re.search(r'^#\s+(.+)$', fixed.get("markdown", ""), re.MULTILINE)
+                if title_match:
+                    fixed["title"] = title_match.group(1).strip()
+                else:
+                    fixed["title"] = "PRD Document"
+
+            # 确保 version 存在
+            if "version" not in fixed:
+                fixed["version"] = "1.0"
+
+            # 确保 sections 存在
+            if "sections" not in fixed or not isinstance(fixed["sections"], list):
+                fixed["sections"] = []
 
         elif skill_id == "tech-architecture":
             # 确保components是列表

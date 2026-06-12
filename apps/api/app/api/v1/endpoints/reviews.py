@@ -1,15 +1,23 @@
-"""Review checklist endpoints for PRD quality assurance"""
+"""Review checklist endpoints for PRD quality assurance
 
-from fastapi import APIRouter, Depends
+评审结果现在持久化到 ReviewRecord 模型（替代 project.settings 临时存储）。
+"""
+
+from datetime import datetime, timezone
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, desc
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.security import get_current_user_id
 from app.core.responses import ResponseBuilder
+from app.core.permissions import require_project_owner
 from app.models.project import Project
+from app.models.review_record import ReviewRecord, ReviewType, ReviewStatus
+from app.core.exceptions import AppException
 
 router = APIRouter()
 
@@ -77,6 +85,7 @@ class ChecklistSubmit(BaseModel):
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("/projects/{project_id}/reviews/checklist", response_model=dict)
 async def get_checklist(
     project_id: str,
@@ -85,12 +94,7 @@ async def get_checklist(
     db: AsyncSession = Depends(get_db)
 ):
     """Get review checklist for a project (based on industry)"""
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    project = proj_result.scalar_one_or_none()
-    if not project:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
+    project = await require_project_owner(db, project_id, user_id)
 
     industry = (project.industry or "default").lower()
     items = CHECKLISTS.get(industry, CHECKLISTS["default"])
@@ -102,6 +106,7 @@ async def get_checklist(
     })
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/projects/{project_id}/reviews/checklist", response_model=dict)
 async def submit_checklist(
     project_id: str,
@@ -111,12 +116,7 @@ async def submit_checklist(
     db: AsyncSession = Depends(get_db)
 ):
     """Submit checklist review results"""
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    project = proj_result.scalar_one_or_none()
-    if not project:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
+    project = await require_project_owner(db, project_id, user_id)
 
     industry = (project.industry or "default").lower()
     items = CHECKLISTS.get(industry, CHECKLISTS["default"])
@@ -128,14 +128,107 @@ async def submit_checklist(
         1 for i in data.items
         if i.checked and i.item_id in {r["id"] for r in required_items}
     )
+    all_required_passed = required_checked >= len(required_items)
 
-    return ResponseBuilder.success({
+    # 持久化到 ReviewRecord（替代 project.settings 临时存储）
+    now = datetime.now(timezone.utc)
+    record = ReviewRecord(
+        project_id=project_id,
+        prd_id=prd_id,
+        review_type=ReviewType.CHECKLIST,
+        status=ReviewStatus.COMPLETED,
+        industry=industry,
+        total_items=len(items),
+        checked_count=checked_count,
+        required_items=len(required_items),
+        required_checked=required_checked,
+        all_required_passed=1 if all_required_passed else 0,
+        items=[{"item_id": i.item_id, "checked": i.checked, "note": i.note} for i in data.items],
+        submitted_by=user_id,
+        submitted_at=now,
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    result_payload = {
+        "id": record.id,
         "project_id": project_id,
+        "prd_id": prd_id,
         "industry": industry,
         "total_items": len(items),
         "checked_count": checked_count,
         "required_items": len(required_items),
         "required_checked": required_checked,
-        "all_required_passed": required_checked >= len(required_items),
-        "items": [{"item_id": i.item_id, "checked": i.checked, "note": i.note} for i in data.items],
-    })
+        "all_required_passed": all_required_passed,
+        "items": record.items,
+        "submitted_at": record.submitted_at.isoformat() if record.submitted_at else None,
+        "submitted_by": user_id,
+    }
+
+    return ResponseBuilder.success(result_payload)
+
+
+# ============== Review History ==============
+
+
+@rate_limit(requests=100, window=60)
+@router.get("/projects/{project_id}/reviews/history", response_model=dict)
+async def get_review_history(
+    project_id: str,
+    prd_id: Optional[str] = None,
+    review_type: Optional[str] = None,
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """查询评审历史记录"""
+    await require_project_owner(db, project_id, user_id)
+
+    query = select(ReviewRecord).where(
+        ReviewRecord.project_id == project_id,
+    ).order_by(desc(ReviewRecord.submitted_at))
+
+    if prd_id:
+        query = query.where(ReviewRecord.prd_id == prd_id)
+    if review_type:
+        query = query.where(ReviewRecord.review_type == ReviewType(review_type))
+
+    # Total count
+    count_query = select(ReviewRecord).where(ReviewRecord.project_id == project_id)
+    if prd_id:
+        count_query = count_query.where(ReviewRecord.prd_id == prd_id)
+    if review_type:
+        count_query = count_query.where(ReviewRecord.review_type == ReviewType(review_type))
+    total_result = await db.execute(count_query)
+    total = len(total_result.scalars().all())
+
+    query = query.offset(offset).limit(limit)
+    result = await db.execute(query)
+    records = result.scalars().all()
+
+    return ResponseBuilder.paginated(
+        data=[{
+            "id": r.id,
+            "project_id": r.project_id,
+            "prd_id": r.prd_id,
+            "review_type": r.review_type.value if r.review_type else None,
+            "status": r.status.value if r.status else None,
+            "industry": r.industry,
+            "total_items": r.total_items,
+            "checked_count": r.checked_count,
+            "required_items": r.required_items,
+            "required_checked": r.required_checked,
+            "all_required_passed": bool(r.all_required_passed),
+            "items": r.items,
+            "score": r.score,
+            "result_summary": r.result_summary,
+            "submitted_by": r.submitted_by,
+            "submitted_at": r.submitted_at.isoformat() if r.submitted_at else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in records],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )

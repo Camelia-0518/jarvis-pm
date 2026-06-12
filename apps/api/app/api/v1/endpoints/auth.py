@@ -1,7 +1,7 @@
 """Authentication endpoints with security enhancements"""
 
-from datetime import timedelta
-from fastapi import APIRouter, Depends, HTTPException, status, Request, Body
+from datetime import datetime
+from fastapi import APIRouter, Depends, Request, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,13 +16,13 @@ from app.core.security import (
     get_current_user_id,
     decode_token,
 )
-from app.core.responses import ResponseBuilder, ErrorCode
+from app.core.responses import ResponseBuilder
 from app.core.exceptions import (
     AuthenticationError,
     ValidationError,
     ResourceConflictError
 )
-from app.core.rate_limit import rate_limit, get_rate_limiter
+from app.core.rate_limit import rate_limit
 from app.core.logging_config import audit
 from app.models.user import User, UserRole
 
@@ -62,8 +62,8 @@ class UserResponse(BaseModel):
     is_active: bool
 
 
-@router.post("/register", response_model=dict)
 @rate_limit(requests=5, window=300)  # 5 registrations per 5 minutes
+@router.post("/register")
 async def register(
     request: Request,
     data: UserRegisterRequest,
@@ -112,8 +112,8 @@ async def register(
     })
 
 
-@router.post("/login", response_model=dict)
 @rate_limit(requests=10, window=60)  # 10 logins per minute
+@router.post("/login")
 async def login(
     request: Request,
     data: UserLoginRequest,
@@ -163,6 +163,7 @@ async def login(
     })
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/me", response_model=dict)
 async def get_me(
     user_id: str = Depends(get_current_user_id),
@@ -193,8 +194,8 @@ async def get_me(
     })
 
 
-@router.put("/me/password", response_model=dict)
 @rate_limit(requests=3, window=300)  # 3 password changes per 5 minutes
+@router.put("/me/password")
 async def change_password(
     request: Request,
     old_password: str = Body(..., min_length=1),
@@ -232,6 +233,7 @@ async def change_password(
     return ResponseBuilder.success(message="Password changed successfully")
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/refresh", response_model=dict)
 async def refresh_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),

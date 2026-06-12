@@ -231,7 +231,7 @@ export default function PRDWizard({ projectId, projectName, projectDescription, 
                 <div className="text-center py-8">
                   <div className="text-3xl mb-2">👤</div>
                   <div className="text-slate-500 dark:text-slate-400">暂无用户画像</div>
-                  <div className="text-sm text-slate-400 mt-1">先去"用户画像"标签页添加角色</div>
+                  <div className="text-sm text-slate-400 mt-1">先去&ldquo;用户画像&rdquo;标签页添加角色</div>
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -274,7 +274,7 @@ export default function PRDWizard({ projectId, projectName, projectDescription, 
                 <div className="text-center py-8">
                   <div className="text-3xl mb-2">⚔️</div>
                   <div className="text-slate-500 dark:text-slate-400">暂无竞品信息</div>
-                  <div className="text-sm text-slate-400 mt-1">先去"竞品信息"标签页添加竞品</div>
+                  <div className="text-sm text-slate-400 mt-1">先去&ldquo;竞品信息&rdquo;标签页添加竞品</div>
                 </div>
               ) : (
                 <div className="space-y-2">

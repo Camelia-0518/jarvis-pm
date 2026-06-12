@@ -1,14 +1,18 @@
 """Database configuration with connection pooling and optimizations"""
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
+import logging
+import re
+
+from sqlalchemy import inspect, text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool, QueuePool
-from sqlalchemy import event, text
 import logging
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+INDEX_TARGET_RE = re.compile(r"\bON\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", re.IGNORECASE)
 
 # Create async engine with connection pooling
 if settings.DEBUG:
@@ -62,28 +66,55 @@ async def get_db_transaction():
     session = AsyncSessionLocal()
     try:
         yield session
+    except Exception:
+        await session.rollback()
+        raise
     finally:
         await session.close()
 
 
 async def init_db():
-    """Initialize database tables"""
-    # Import all models to ensure they are registered with Base.metadata
+    """Initialize database: connection settings + conditional schema creation.
+
+    In DEBUG mode: creates tables via ``Base.metadata.create_all`` and seeds
+    builtin data.  In production: only sets up connection-level settings
+    (WAL mode, etc.) — schema migration is handled by Alembic.
+    """
+    # Enable WAL mode for SQLite to allow concurrent reads during writes
+    if "sqlite" in settings.DATABASE_URL:
+        async with engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
+        logger.info("SQLite WAL mode enabled")
+
+    if not settings.DEBUG:
+        logger.info(
+            "Production mode: skipping create_all (use Alembic migrations). "
+            "Run 'alembic upgrade head' before starting the app."
+        )
+        return
+
+    # --- DEBUG only below this point ---
     from app.models import (
         User,
         Project,
         PRD,
         SkillExecution,
-        Battle,
         MemoryEntry,
         Feedback,
         PRDVersion,
         PRDAnnotation,
+        PRDComment,
         MemoryChunk,
         Persona,
         Competitor,
         Template,
         PromptTemplate,
+        PRDRevisionTask,
+        DeliveryPlan,
+        DeliveryMethodology,
+        Retrospective,
+        Lesson,
     )
     from app.api.v1.endpoints.templates import seed_builtin_templates
 
@@ -205,11 +236,6 @@ INDEX_DEFINITIONS = {
     "idx_requirements_created_by": "CREATE INDEX IF NOT EXISTS idx_requirements_created_by ON requirements(created_by)",
     "idx_requirements_status": "CREATE INDEX IF NOT EXISTS idx_requirements_status ON requirements(status)",
 
-    # Battle indexes
-    "idx_battles_project_id": "CREATE INDEX IF NOT EXISTS idx_battles_project_id ON battles(project_id)",
-    "idx_battles_prd_id": "CREATE INDEX IF NOT EXISTS idx_battles_prd_id ON battles(prd_id)",
-    "idx_battles_created_by": "CREATE INDEX IF NOT EXISTS idx_battles_created_by ON battles(created_by)",
-
     # Composite indexes for common query patterns
     "idx_prds_project_status": "CREATE INDEX IF NOT EXISTS idx_prds_project_status ON prds(project_id, status)",
     "idx_projects_status_created": "CREATE INDEX IF NOT EXISTS idx_projects_status_created ON projects(status, created_at DESC)",
@@ -218,31 +244,61 @@ INDEX_DEFINITIONS = {
     "idx_prompt_templates_name": "CREATE INDEX IF NOT EXISTS idx_prompt_templates_name ON prompt_templates(name)",
     "idx_prompt_templates_active": "CREATE INDEX IF NOT EXISTS idx_prompt_templates_active ON prompt_templates(is_active)",
     "idx_prompt_templates_name_version": "CREATE UNIQUE INDEX IF NOT EXISTS idx_prompt_templates_name_version ON prompt_templates(name, version)",
+
+    # Delivery plan indexes
+    "idx_delivery_plans_project_id": "CREATE INDEX IF NOT EXISTS idx_delivery_plans_project_id ON delivery_plans(project_id)",
+    "idx_delivery_plans_prd_id": "CREATE INDEX IF NOT EXISTS idx_delivery_plans_prd_id ON delivery_plans(prd_id)",
+    "idx_delivery_plans_status": "CREATE INDEX IF NOT EXISTS idx_delivery_plans_status ON delivery_plans(status)",
+    "idx_delivery_plans_created_by": "CREATE INDEX IF NOT EXISTS idx_delivery_plans_created_by ON delivery_plans(created_by)",
+    "idx_delivery_plans_created_at": "CREATE INDEX IF NOT EXISTS idx_delivery_plans_created_at ON delivery_plans(created_at DESC)",
 }
 
 
 async def create_indexes():
     """Create database indexes for performance optimization"""
     async with engine.begin() as conn:
+        existing_tables = await conn.run_sync(
+            lambda sync_conn: set(inspect(sync_conn).get_table_names())
+        )
+
         for index_name, sql in INDEX_DEFINITIONS.items():
+            match = INDEX_TARGET_RE.search(sql)
+            table_name = match.group(1) if match else None
+
+            if table_name and table_name not in existing_tables:
+                logger.warning(
+                    "Skipping index %s because table %s is not present in current schema",
+                    index_name,
+                    table_name,
+                )
+                continue
+
             try:
                 await conn.execute(text(sql))
                 logger.info(f"Created index: {index_name}")
             except Exception as e:
                 logger.warning(f"Failed to create index {index_name}: {e}")
+                if not settings.DEBUG:
+                    raise
 
 
 async def optimize_db():
-    """Run database optimization commands"""
+    """Run database optimization commands.
+
+    WARNING: VACUUM requires an exclusive lock and should only be run
+    during maintenance windows. ANALYZE is safe to run online.
+    PRAGMA optimize is skipped in DEBUG mode as it can be slow on large DBs.
+    """
     async with engine.begin() as conn:
         if "sqlite" in settings.DATABASE_URL:
-            # SQLite optimizations
-            await conn.execute(text("PRAGMA optimize"))
+            # SQLite: ANALYZE is sufficient for query planner stats.
+            # PRAGMA optimize is omitted in DEBUG to avoid startup delays.
+            if not settings.DEBUG:
+                await conn.execute(text("PRAGMA optimize"))
             await conn.execute(text("ANALYZE"))
         elif "postgresql" in settings.DATABASE_URL:
-            # PostgreSQL optimizations
+            # PostgreSQL: ANALYZE only (safe online), skip VACUUM
             await conn.execute(text("ANALYZE"))
-            await conn.execute(text("VACUUM ANALYZE"))
 
     logger.info("Database optimization completed")
 
@@ -269,7 +325,7 @@ class QueryOptimizer:
     @staticmethod
     def eager_load(query, *relationships):
         """Apply eager loading to query"""
-        from sqlalchemy.orm import joinedload, selectinload
+        from sqlalchemy.orm import selectinload
 
         for relationship in relationships:
             if isinstance(relationship, str):

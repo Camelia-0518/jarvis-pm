@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { projectApi, type ProjectHealthResponse, type ProjectHealthItem } from "@/lib/api";
+import { devError } from "@/utils/logger";
 
 const RISK_CONFIG = {
   on_track: { label: "正常", color: "bg-emerald-500", bg: "bg-emerald-50", border: "border-emerald-200", text: "text-emerald-700" },
@@ -25,7 +26,7 @@ export default function ProjectHealthPanel() {
   useEffect(() => {
     projectApi.health()
       .then(setHealth)
-      .catch(() => {})
+      .catch((err: unknown) => { devError("Failed to load project health", err); setHealth(null); })
       .finally(() => setLoading(false));
   }, []);
 

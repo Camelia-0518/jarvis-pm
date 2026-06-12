@@ -59,7 +59,7 @@ export function BranchComparison() {
     if (selectedBranches.length >= 2) {
       compareBranches(selectedBranches)
     }
-  }, [selectedBranches])
+  }, [selectedBranches, compareBranches])
 
   const toggleFeature = (featureName: string) => {
     const newSet = new Set(expandedFeatures)
@@ -189,7 +189,7 @@ export function BranchComparison() {
         ) : comparisonView.length === 0 ? (
           <div className="text-center py-12 text-muted-foreground border rounded-lg">
             <Building2 className="w-12 h-12 mx-auto mb-3 opacity-30" />
-            <p className="text-sm">点击"开始对比"查看功能差异</p>
+            <p className="text-sm">点击&ldquo;开始对比&rdquo;查看功能差异</p>
             <Button
               className="mt-4"
               onClick={() => compareBranches(selectedBranches)}

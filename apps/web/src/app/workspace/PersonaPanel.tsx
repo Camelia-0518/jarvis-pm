@@ -38,6 +38,7 @@ export default function PersonaPanel({ projectId }: Props) {
 
   useEffect(() => {
     loadPersonas();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId]);
 
   const resetForm = () => {

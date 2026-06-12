@@ -54,6 +54,7 @@ export default function WorkflowCanvas({
       setNodes([]);
       setEdges([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateId]);
 
   // 根据执行结果更新节点状态
@@ -101,7 +102,7 @@ export default function WorkflowCanvas({
     // 更新总进度
     const completedCount = executionResults.filter((r) => r.status === 'completed').length;
     updateProgress(Math.round((completedCount / executionResults.length) * 100));
-  }, [executionResults, templateId]);
+  }, [executionResults, templateId, setEdges, setNodes, updateProgress]);
 
   // 执行中时，显示所有节点为运行中（按顺序）
   useEffect(() => {
@@ -149,7 +150,7 @@ export default function WorkflowCanvas({
     }, 1500);
 
     return () => clearInterval(interval);
-  }, [isExecuting, templateId]);
+  }, [isExecuting, templateId, setEdges, setNodes, updateAgentStatus]);
 
   const loadTemplate = (template: typeof WORKFLOW_TEMPLATES[0]) => {
     const newNodes: Node[] = template.nodes.map((node, index) => ({

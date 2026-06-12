@@ -2,16 +2,20 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useMemo, useState, useEffect } from "react";
+import WorkspaceSwitcher from "./WorkspaceSwitcher";
+import { usePermission } from "@/hooks/usePermission";
 
 const NAV_ITEMS = [
-  { href: "/dashboard", label: "工作台" },
-  { href: "/workspace", label: "写PRD" },
-  { href: "/delivery", label: "交付中心" },
-  { href: "/templates", label: "模板管理" },
-  { href: "/battle", label: "需求Battle" },
-  { href: "/workflow", label: "工作流" },
-  { href: "/skills", label: "技能广场" },
-  { href: "/prompts", label: "提示词" },
+  { href: "/dashboard", label: "工作台", minRole: null as "viewer" | null },
+  { href: "/workspace", label: "写PRD", minRole: "viewer" as const },
+  { href: "/delivery", label: "交付中心", minRole: "viewer" as const },
+  { href: "/assets", label: "资产中心", minRole: "viewer" as const },
+  { href: "/workflow", label: "工作流", minRole: "editor" as const },
+  { href: "/audit", label: "审计日志", minRole: "admin" as const },
+  { href: "/jobs", label: "任务中心", minRole: "admin" as const },
+  { href: "/settings/workspace", label: "设置", minRole: "admin" as const },
+  { href: "/system", label: "系统", minRole: "admin" as const },
 ];
 
 interface Props {
@@ -21,6 +25,21 @@ interface Props {
 
 export default function NavHeader({ children }: Props) {
   const pathname = usePathname();
+  const canEdit = usePermission("editor");
+  const canAdmin = usePermission("admin");
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => { setMounted(true); }, []);
+
+  const visibleItems = useMemo(() => {
+    // Before hydration, show all items to match server render
+    if (!mounted) return NAV_ITEMS;
+    return NAV_ITEMS.filter((item) => {
+      if (!item.minRole) return true;
+      if (item.minRole === "admin") return canAdmin;
+      if (item.minRole === "editor") return canEdit;
+      return true;
+    });
+  }, [canEdit, canAdmin, mounted]);
 
   const linkClass = (href: string) =>
     href === pathname
@@ -30,17 +49,18 @@ export default function NavHeader({ children }: Props) {
   return (
     <header className="border-b bg-white dark:bg-slate-950">
       <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center gap-8">
+        <div className="flex items-center gap-6">
           <Link href="/" className="flex items-center gap-2 flex-shrink-0">
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-600 text-white font-bold">
               J
             </div>
-            <span className="text-xl font-semibold text-slate-900 dark:text-white">
+            <span className="text-xl font-semibold text-slate-900 dark:text-white hidden sm:inline">
               Jarvis PM
             </span>
           </Link>
-          <nav className="hidden md:flex items-center gap-4">
-            {NAV_ITEMS.map((item) => (
+          <WorkspaceSwitcher />
+          <nav className="hidden lg:flex items-center gap-4">
+            {visibleItems.map((item) => (
               <Link key={item.href} href={item.href} className={linkClass(item.href)}>
                 {item.label}
               </Link>

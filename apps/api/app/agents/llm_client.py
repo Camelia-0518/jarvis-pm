@@ -115,7 +115,7 @@ class KimiHTTPClient(LLMClient):
     async def chat(
         self,
         messages: List[Dict[str, str]],
-        temperature: float = 0.7,
+        temperature: float = 0.3,
         max_tokens: int = 4000,
         **kwargs,
     ) -> str:
@@ -155,11 +155,27 @@ class KimiHTTPClient(LLMClient):
             reasoning = msg.get("reasoning_content") or ""
             if not content.strip() and reasoning.strip():
                 lines = reasoning.strip().split("\n")
+                # Expanded filter: common thinking prefixes in Chinese & English
+                THINKING_PREFIXES = (
+                    "用户", "我需", "让我", "首先", "接下来", "我需要", "我应该",
+                    "考虑到", "基于", "分析", "思考", "嗯", "好的", "那么",
+                    "现在", "接下来", "最后", "总结", "因此", "所以",
+                    "I need", "Let me", "First", "Next", "Then", "So",
+                    "Based on", "Considering", "Analyzing", "Thinking",
+                    "Okay", "Alright", "Now", "Finally", "Therefore",
+                )
                 for line in reversed(lines):
                     stripped = line.strip()
-                    if stripped and len(stripped) > 5 and not stripped.startswith(("用户", "我需", "让我", "首先", "接下来")):
+                    if stripped and len(stripped) > 5 and not any(stripped.startswith(p) for p in THINKING_PREFIXES):
                         content = stripped
                         break
+                if not content:
+                    # Fallback: if all lines filtered, try to find a code block or list
+                    for line in reversed(lines):
+                        stripped = line.strip()
+                        if stripped and (stripped.startswith("#") or stripped.startswith("-") or stripped.startswith("|") or stripped.startswith("`")):
+                            content = stripped
+                            break
                 if not content:
                     content = reasoning.strip()
             if not content.strip():
@@ -205,17 +221,134 @@ class KimiHTTPClient(LLMClient):
                         body=body.decode(),
                     )
                 async for line in response.aiter_lines():
-                    if line.startswith("data: "):
-                        data = line[6:]
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
                         if data == "[DONE]":
                             break
                         try:
                             chunk = json.loads(data)
-                            delta = chunk["choices"][0].get("delta", {})
-                            if "content" in delta:
-                                yield delta["content"]
+                            choices = chunk.get("choices")
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content") or ""
+                            # Never yield reasoning_content in streaming mode
+                            # to prevent thinking content from leaking to users
+                            if content:
+                                yield content
                         except Exception:
-                            pass
+                            logger.debug("Kimi SSE parse error, skipping line")
+
+
+class DeepSeekHTTPClient(LLMClient):
+    """DeepSeek HTTP 客户端 (OpenAI-compatible API)"""
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: str = "https://api.deepseek.com/v1",
+        model: str = "deepseek-v4-flash",
+        timeout: float = 180.0,
+    ):
+        self.api_key = api_key or settings.DEEPSEEK_API_KEY
+        self.model = model or settings.DEEPSEEK_MODEL
+        self.timeout = timeout
+        self.base_url = (base_url or settings.DEEPSEEK_BASE_URL).rstrip('/')
+
+    async def chat(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.3,
+        max_tokens: int = 4000,
+        **kwargs,
+    ) -> str:
+        if not self.api_key:
+            raise AuthenticationError("Missing DEEPSEEK_API_KEY", request=None, body=None)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+            **kwargs,
+        }
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            )
+            if response.status_code != 200:
+                raise APIError(
+                    f"DeepSeek API error: {response.status_code} - {response.text}",
+                    request=response.request,
+                    body=response.text,
+                )
+            data = response.json()
+            content = data["choices"][0]["message"].get("content") or ""
+            if not content.strip():
+                raise APIError("DeepSeek API returned empty content", request=None, body=None)
+            return content
+
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 4000,
+        **kwargs,
+    ) -> AsyncIterator[str]:
+        if not self.api_key:
+            raise AuthenticationError("Missing DEEPSEEK_API_KEY", request=None, body=None)
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+            **kwargs,
+        }
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with client.stream(
+                "POST",
+                f"{self.base_url}/chat/completions",
+                headers=headers,
+                json=payload,
+            ) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    raise APIError(
+                        f"DeepSeek API error: {response.status_code} - {body.decode()}",
+                        request=response.request,
+                        body=body.decode(),
+                    )
+                async for line in response.aiter_lines():
+                    if line.startswith("data:"):
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                            choices = chunk.get("choices")
+                            if not choices:
+                                continue
+                            delta = choices[0].get("delta", {})
+                            content = delta.get("content") or ""
+                            if content:
+                                yield content
+                        except Exception:
+                            logger.debug("DeepSeek SSE parse error, skipping line")
 
 
 class OpenAIHTTPClient(LLMClient):
@@ -245,7 +378,7 @@ class OpenAIHTTPClient(LLMClient):
     async def chat(
         self,
         messages: List[Dict[str, str]],
-        temperature: float = 0.7,
+        temperature: float = 0.3,
         max_tokens: int = 4000,
         **kwargs,
     ) -> str:
@@ -326,7 +459,7 @@ class AnthropicHTTPClient(LLMClient):
     async def chat(
         self,
         messages: List[Dict[str, str]],
-        temperature: float = 0.7,
+        temperature: float = 0.3,
         max_tokens: int = 4000,
         **kwargs,
     ) -> str:
@@ -368,7 +501,7 @@ class AnthropicHTTPClient(LLMClient):
 class FallbackLLMClient(LLMClient):
     """
     带自动降级的 LLM 客户端
-    尝试顺序: Kimi -> OpenAI -> Anthropic
+    尝试顺序: DeepSeek -> Kimi -> OpenAI -> Anthropic
 
     重要：如果没有配置任何真实 AI 提供商的 API key，将直接抛出错误，
     绝不静默降级到 Mock（避免用户误以为获得了真实 AI 响应）。
@@ -382,11 +515,13 @@ class FallbackLLMClient(LLMClient):
             self.clients = clients
         else:
             self.clients = []
-            if settings.KIMI_API_KEY.strip():
+            if settings.DEEPSEEK_API_KEY and settings.DEEPSEEK_API_KEY.strip():
+                self.clients.append(DeepSeekHTTPClient())
+            if settings.KIMI_API_KEY and settings.KIMI_API_KEY.strip():
                 self.clients.append(KimiHTTPClient())
-            if settings.OPENAI_API_KEY.strip():
+            if settings.OPENAI_API_KEY and settings.OPENAI_API_KEY.strip():
                 self.clients.append(OpenAIHTTPClient())
-            if settings.ANTHROPIC_API_KEY.strip():
+            if settings.ANTHROPIC_API_KEY and settings.ANTHROPIC_API_KEY.strip():
                 self.clients.append(AnthropicHTTPClient())
 
             # 如果没有任何真实 provider 被配置，立即报错
@@ -523,9 +658,11 @@ class LLMClientFactory:
             return OpenAIHTTPClient()
         if provider in ("anthropic", "claude"):
             return AnthropicHTTPClient()
+        if provider == "deepseek":
+            return DeepSeekHTTPClient()
         raise ValueError(
             f"Unknown provider: {provider}. "
-            "Available: fallback, kimi, openai, anthropic, claude"
+            "Available: fallback, kimi, openai, anthropic, claude, deepseek"
         )
 
 

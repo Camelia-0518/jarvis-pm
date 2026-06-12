@@ -8,10 +8,12 @@ from sqlalchemy import select, desc
 from datetime import datetime
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limit
 from app.core.security import get_current_user_id
 from app.core.responses import ResponseBuilder
 from app.models.persona import Persona
-from app.models.project import Project
+from app.core.exceptions import AppException
+from ._crud_helpers import verify_project_owner, get_owned_resource, list_project_resources, apply_update
 
 router = APIRouter()
 
@@ -57,6 +59,7 @@ class PersonaResponse(BaseModel):
 
 # ============== Endpoints ==============
 
+@rate_limit(requests=100, window=60)
 @router.get("/projects/{project_id}/personas", response_model=dict)
 async def list_personas(
     project_id: str,
@@ -64,22 +67,11 @@ async def list_personas(
     db: AsyncSession = Depends(get_db)
 ):
     """List all personas for a project"""
-    # Verify project ownership
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    if not proj_result.scalar_one_or_none():
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
-
-    result = await db.execute(
-        select(Persona)
-        .where(Persona.project_id == project_id)
-        .order_by(desc(Persona.created_at))
-    )
-    personas = result.scalars().all()
-    return ResponseBuilder.success([PersonaResponse.model_validate(p) for p in personas])
+    items, schema = await list_project_resources(db, Persona, project_id, user_id, PersonaResponse)
+    return ResponseBuilder.success([schema.model_validate(p) for p in items])
 
 
+@rate_limit(requests=30, window=60)
 @router.post("/projects/{project_id}/personas", response_model=dict)
 async def create_persona(
     project_id: str,
@@ -88,30 +80,16 @@ async def create_persona(
     db: AsyncSession = Depends(get_db)
 ):
     """Create a new persona for a project"""
-    # Verify project ownership
-    proj_result = await db.execute(
-        select(Project).where(Project.id == project_id, Project.created_by == user_id)
-    )
-    if not proj_result.scalar_one_or_none():
-        return ResponseBuilder.error(code="NOT_FOUND", message="Project not found")
+    await verify_project_owner(db, project_id, user_id)
 
-    persona = Persona(
-        project_id=project_id,
-        created_by=user_id,
-        name=data.name,
-        role=data.role,
-        description=data.description,
-        pain_points=data.pain_points,
-        goals=data.goals,
-        scenarios=data.scenarios,
-        demographics=data.demographics,
-    )
+    persona = Persona(project_id=project_id, created_by=user_id, **data.model_dump())
     db.add(persona)
     await db.commit()
     await db.refresh(persona)
     return ResponseBuilder.success(PersonaResponse.model_validate(persona))
 
 
+@rate_limit(requests=100, window=60)
 @router.get("/personas/{persona_id}", response_model=dict)
 async def get_persona(
     persona_id: str,
@@ -119,18 +97,11 @@ async def get_persona(
     db: AsyncSession = Depends(get_db)
 ):
     """Get a single persona"""
-    result = await db.execute(
-        select(Persona)
-        .where(Persona.id == persona_id)
-        .join(Project, Persona.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    persona = result.scalar_one_or_none()
-    if not persona:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Persona not found")
+    persona = await get_owned_resource(db, Persona, persona_id, user_id)
     return ResponseBuilder.success(PersonaResponse.model_validate(persona))
 
 
+@rate_limit(requests=30, window=60)
 @router.put("/personas/{persona_id}", response_model=dict)
 async def update_persona(
     persona_id: str,
@@ -139,24 +110,12 @@ async def update_persona(
     db: AsyncSession = Depends(get_db)
 ):
     """Update a persona"""
-    result = await db.execute(
-        select(Persona)
-        .where(Persona.id == persona_id)
-        .join(Project, Persona.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    persona = result.scalar_one_or_none()
-    if not persona:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Persona not found")
-
-    for field, value in data.model_dump(exclude_unset=True).items():
-        setattr(persona, field, value)
-
-    await db.commit()
-    await db.refresh(persona)
+    persona = await get_owned_resource(db, Persona, persona_id, user_id)
+    await apply_update(db, persona, data)
     return ResponseBuilder.success(PersonaResponse.model_validate(persona))
 
 
+@rate_limit(requests=20, window=60)
 @router.delete("/personas/{persona_id}", response_model=dict)
 async def delete_persona(
     persona_id: str,
@@ -164,16 +123,7 @@ async def delete_persona(
     db: AsyncSession = Depends(get_db)
 ):
     """Delete a persona"""
-    result = await db.execute(
-        select(Persona)
-        .where(Persona.id == persona_id)
-        .join(Project, Persona.project_id == Project.id)
-        .where(Project.created_by == user_id)
-    )
-    persona = result.scalar_one_or_none()
-    if not persona:
-        return ResponseBuilder.error(code="NOT_FOUND", message="Persona not found")
-
-    await db.delete(persona)
+    persona = await get_owned_resource(db, Persona, persona_id, user_id)
+    persona.soft_delete()
     await db.commit()
     return ResponseBuilder.success({"deleted": True})

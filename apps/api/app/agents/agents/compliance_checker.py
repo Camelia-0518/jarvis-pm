@@ -10,11 +10,13 @@ import os
 os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import json
-from typing import Dict, Any, List, Optional
+import logging
+from typing import Dict, Any, List
 from datetime import datetime
 
+logger = logging.getLogger(__name__)
+
 from ..base import BaseAgent, AgentResult, AgentState
-from ..llm_client import create_default_client
 
 
 class ComplianceChecker(BaseAgent):
@@ -128,13 +130,7 @@ class ComplianceChecker(BaseAgent):
 
 输出详细的合规检查报告，包含风险等级和整改建议。"""
 
-    def __init__(self, llm_client=None, **kwargs):
-        super().__init__(
-            llm_client=llm_client or create_default_client(),
-            **kwargs
-        )
-
-    async def execute(self, input_data: Dict[str, Any]) -> AgentResult:
+    async def _do_execute(self, input_data: Dict[str, Any]) -> AgentResult:
         """
         执行合规检查
 
@@ -144,76 +140,61 @@ class ComplianceChecker(BaseAgent):
         Returns:
             AgentResult: 包含合规检查报告
         """
-        start_time = datetime.now()
-        self._set_state(AgentState.RUNNING)
+        product_name = input_data.get("product_name", "")
+        industry = input_data.get("industry", "")
+        features = input_data.get("features", [])
 
-        try:
-            product_name = input_data.get("product_name", "")
-            industry = input_data.get("industry", "")
-            features = input_data.get("features", [])
+        # 步骤1: 基础合规检查
+        step1 = self._create_step("basic_check", "基础合规检查")
+        basic_results = self._check_basic_compliance()
+        self._complete_step(step1, f"检查 {len(basic_results)} 项基础要求")
 
-            # 步骤1: 基础合规检查
-            step1 = self._create_step("basic_check", "基础合规检查")
-            basic_results = self._check_basic_compliance()
-            self._complete_step(step1, f"检查 {len(basic_results)} 项基础要求")
+        # 步骤2: 医疗行业特殊检查
+        step2 = self._create_step("medical_check", "医疗行业特殊要求")
+        medical_results = self._check_medical_requirements(features)
+        self._complete_step(step2, f"检查 {len(medical_results)} 项医疗要求")
 
-            # 步骤2: 医疗行业特殊检查
-            step2 = self._create_step("medical_check", "医疗行业特殊要求")
-            medical_results = self._check_medical_requirements(features)
-            self._complete_step(step2, f"检查 {len(medical_results)} 项医疗要求")
+        # 步骤3: 功能特性风险分析
+        step3 = self._create_step("feature_risk", "功能特性风险分析")
+        feature_risks = await self._analyze_feature_risks(features)
+        self._complete_step(step3, f"分析 {len(feature_risks)} 个功能风险")
 
-            # 步骤3: 功能特性风险分析
-            step3 = self._create_step("feature_risk", "功能特性风险分析")
-            feature_risks = await self._analyze_feature_risks(features)
-            self._complete_step(step3, f"分析 {len(feature_risks)} 个功能风险")
+        # 步骤4: 生成整改建议
+        step4 = self._create_step("recommendations", "生成整改建议")
+        all_issues = basic_results + medical_results + feature_risks
+        recommendations = self._generate_recommendations(all_issues)
+        self._complete_step(step4, f"生成 {len(recommendations)} 条建议")
 
-            # 步骤4: 生成整改建议
-            step4 = self._create_step("recommendations", "生成整改建议")
-            all_issues = basic_results + medical_results + feature_risks
-            recommendations = self._generate_recommendations(all_issues)
-            self._complete_step(step4, f"生成 {len(recommendations)} 条建议")
+        # 步骤5: 生成报告
+        step5 = self._create_step("generate_report", "生成合规报告")
+        report = self._generate_report(
+            product_name=product_name,
+            industry=industry,
+            basic_results=basic_results,
+            medical_results=medical_results,
+            feature_risks=feature_risks,
+            recommendations=recommendations
+        )
+        self._complete_step(step5, f"报告长度: {len(report)} 字符")
 
-            # 步骤5: 生成报告
-            step5 = self._create_step("generate_report", "生成合规报告")
-            report = self._generate_report(
-                product_name=product_name,
-                industry=industry,
-                basic_results=basic_results,
-                medical_results=medical_results,
-                feature_risks=feature_risks,
-                recommendations=recommendations
-            )
-            self._complete_step(step5, f"报告长度: {len(report)} 字符")
+        # 计算合规得分
+        total_items = len(all_issues)
+        passed_items = sum(1 for i in all_issues if i.get("status") == "pass")
+        compliance_score = (passed_items / total_items * 100) if total_items > 0 else 0
 
-            # 计算合规得分
-            total_items = len(all_issues)
-            passed_items = sum(1 for i in all_issues if i.get("status") == "pass")
-            compliance_score = (passed_items / total_items * 100) if total_items > 0 else 0
-
-            execution_time = (datetime.now() - start_time).total_seconds()
-            self._set_state(AgentState.COMPLETED)
-
-            return AgentResult(
-                success=True,
-                output=report,
-                data={
-                    "compliance_score": round(compliance_score, 2),
-                    "total_items": total_items,
-                    "passed_items": passed_items,
-                    "failed_items": total_items - passed_items,
-                    "critical_issues": len([i for i in all_issues if i.get("severity") == "critical"]),
-                    "recommendations": recommendations
-                },
-                execution_time=execution_time
-            )
-
-        except Exception as e:
-            self._set_state(AgentState.FAILED)
-            return AgentResult(
-                success=False,
-                error=str(e),
-                execution_time=(datetime.now() - start_time).total_seconds()
-            )
+        return AgentResult(
+            success=True,
+            output=report,
+            data={
+                "compliance_score": round(compliance_score, 2),
+                "total_items": total_items,
+                "passed_items": passed_items,
+                "failed_items": total_items - passed_items,
+                "critical_issues": len([i for i in all_issues if i.get("severity") == "critical"]),
+                "recommendations": recommendations
+            },
+            execution_time=self.elapsed_seconds
+        )
 
     def _check_basic_compliance(self) -> List[Dict[str, Any]]:
         """基础合规检查"""
@@ -287,7 +268,7 @@ class ComplianceChecker(BaseAgent):
                     "status": "unknown"
                 })
         except Exception:
-            pass
+            logger.warning("Failed to parse compliance risk from LLM output", exc_info=True)
 
         return risks
 
