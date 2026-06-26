@@ -112,9 +112,8 @@ export default function RiskMatrix({ risks, matrix }: Props) {
   const displaySummary = matrix?.summary && Object.values(matrix.summary).some((v) => v > 0)
     ? matrix.summary
     : summary;
-  const displayGrid = matrix?.grid && Object.keys(matrix.grid).length > 0
-    ? matrix.grid
-    : grid;
+  // Grid always computed from risks — avoids key format mismatch with backend
+  const displayGrid = grid;
 
   if (normalized.length === 0) {
     return <p className="text-sm text-slate-500 py-8 text-center">暂无风险数据</p>;

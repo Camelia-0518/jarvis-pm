@@ -2091,6 +2091,25 @@ export interface DeliveryPlanDetail extends DeliveryPlanSummary {
   stakeholder_markdown: string;
 }
 
+export interface RiskHeatmapItem {
+  probability: number; // 1-5 scale
+  impact: number;      // 1-5 scale
+  count: number;
+}
+
+export interface PhaseProgressItem {
+  phase: string;
+  total: number;
+  completed: number;
+  inProgress: number;
+}
+
+export interface TaskTrendItem {
+  date: string;    // "MM-DD" format
+  completed: number;
+  total: number;
+}
+
 export interface DeliveryDashboardData {
   total_plans: number;
   draft: number;
@@ -2112,6 +2131,9 @@ export interface DeliveryDashboardData {
     risk: { score: string; at_risk_plans: number; high_risk_ratio: number; avg_risks_per_plan: number };
     delivery: { score: string; active_ratio: number; task_completion: number; overdue_phases: number };
   };
+  risk_heatmap: RiskHeatmapItem[];
+  phase_progress: PhaseProgressItem[];
+  task_trend: TaskTrendItem[];
 }
 
 // ==================== Delivery API ====================
