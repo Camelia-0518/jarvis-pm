@@ -19,12 +19,16 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
 
-    # CORS
+    # CORS (支持环境变量覆盖，格式: 逗号分隔的URL列表)
+    # 示例: CORS_ORIGINS=https://abc.ngrok-free.app,https://xyz.ngrok.io
     CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
         "http://localhost:3001",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
+        "https://*.ngrok-free.app",
+        "https://*.ngrok.io",
+        "https://*.trycloudflare.com",
     ]
 
     # Database (SQLite for local development, PostgreSQL for production)

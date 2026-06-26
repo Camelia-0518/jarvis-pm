@@ -155,10 +155,15 @@ if not settings.DEBUG:
         allowed_hosts=["localhost", "*.jarvis-pm.com"]
     )
 
-# 2. CORS Middleware
+# 2. CORS Middleware — 使用 allow_origin_regex 支持动态 ngrok/cloudflare 域名
+import re
+CORS_ORIGIN_REGEX = re.compile(
+    r"^(https?://.*\.ngrok-free\.app|https?://.*\.ngrok\.io|https?://.*\.trycloudflare\.com|http://localhost(:\d+)?|http://127\.0\.0\.1(:\d+)?)$"
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
+    allow_origin_regex=CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
