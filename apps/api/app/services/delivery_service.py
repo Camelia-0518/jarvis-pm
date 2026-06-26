@@ -281,6 +281,81 @@ class DeliveryService:
 
         avg_progress = round(total_progress / max(total_phases, 1), 1)
 
+        # ---- Aggregated chart data ----
+
+        # 1) Risk heatmap: aggregate all risks into 5×5 probability×impact grid
+        heatmap: Dict[str, int] = {}
+        for p in plans:
+            for r in (p.risks or []):
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    prob = float(r.get("probability", 0))
+                except (TypeError, ValueError):
+                    prob_str = str(r.get("probability", "")).strip()
+                    prob = {"极高": 0.85, "高": 0.65, "中": 0.4, "低": 0.15}.get(prob_str, 0.5)
+                try:
+                    impact = float(r.get("impact", 0))
+                except (TypeError, ValueError):
+                    imp_str = str(r.get("impact", "")).strip()
+                    impact = {"极高": 0.85, "高": 0.65, "中": 0.4, "低": 0.15}.get(imp_str, 0.5)
+                # Bucket into 1-5 levels
+                pl = 1 if prob <= 0.2 else 2 if prob <= 0.4 else 3 if prob <= 0.6 else 4 if prob <= 0.8 else 5
+                il = 1 if impact <= 0.2 else 2 if impact <= 0.4 else 3 if impact <= 0.6 else 4 if impact <= 0.8 else 5
+                key = f"{pl},{il}"
+                heatmap[key] = heatmap.get(key, 0) + 1
+        risk_heatmap = [
+            {"probability": int(k.split(",")[0]), "impact": int(k.split(",")[1]), "count": v}
+            for k, v in heatmap.items()
+        ]
+
+        # 2) Phase progress: aggregate WBS tasks by phase_name
+        phase_agg: Dict[str, Dict[str, int]] = {}
+        for p in plans:
+            wbs = p.wbs if isinstance(p.wbs, dict) else {}
+            tasks = wbs.get("tasks", []) if isinstance(wbs, dict) else []
+            if not isinstance(tasks, list):
+                continue
+            for t in tasks:
+                if not isinstance(t, dict):
+                    continue
+                phase_name = t.get("phase_name", "") or t.get("phase", "") or "未分类"
+                status = t.get("status", "todo")
+                if phase_name not in phase_agg:
+                    phase_agg[phase_name] = {"total": 0, "completed": 0, "inProgress": 0}
+                phase_agg[phase_name]["total"] += 1
+                if status in ("done", "completed"):
+                    phase_agg[phase_name]["completed"] += 1
+                elif status == "in_progress":
+                    phase_agg[phase_name]["inProgress"] += 1
+        phase_progress = [
+            {"phase": name, "total": c["total"], "completed": c["completed"], "inProgress": c["inProgress"]}
+            for name, c in sorted(phase_agg.items())
+        ]
+
+        # 3) Task trend: last 7 days (interpolated from plan creation & current completion)
+        task_trend = []
+        for days_ago in range(6, -1, -1):
+            d = today - __import__("datetime").timedelta(days=days_ago)
+            label = d.strftime("%m-%d")
+            # Count tasks from plans created on or before this day
+            cum_total = 0
+            cum_completed = 0
+            for p in plans:
+                created = p.created_at.date() if p.created_at and hasattr(p.created_at, 'date') else today
+                if created > d:
+                    continue
+                wbs = p.wbs if isinstance(p.wbs, dict) else {}
+                tasks = wbs.get("tasks", []) if isinstance(wbs, dict) else []
+                if isinstance(tasks, list):
+                    for t in tasks:
+                        if not isinstance(t, dict):
+                            continue
+                        cum_total += 1
+                        if t.get("status") in ("done", "completed"):
+                            cum_completed += 1
+            task_trend.append({"date": label, "completed": cum_completed, "total": cum_total})
+
         # ---- Health scores ----
         active = in_progress + completed
         active_ratio = active / max(total, 1)
@@ -334,6 +409,10 @@ class DeliveryService:
                     "overdue_phases": overdue_count,
                 },
             },
+            # Chart data (for health dashboard visualizations)
+            "risk_heatmap": risk_heatmap,
+            "phase_progress": phase_progress,
+            "task_trend": task_trend,
         }
 
 

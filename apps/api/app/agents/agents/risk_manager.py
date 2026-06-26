@@ -151,7 +151,7 @@ class RiskManagerAgent(BaseAgent):
                 "用户抵触": ["培训", "适应", "使用率"],
             }
             for keyword, risk_key in keyword_triggers.items():
-                if keyword in all_text and risk_key in r["risk"]:
+                if keyword in all_text and any(k in r["risk"] for k in risk_key):
                     r["prob"] = min(1.0, r["prob"] + 0.1)
                     r["impact"] = min(1.0, r["impact"] + 0.05)
             risks.append(r)
@@ -201,8 +201,10 @@ class RiskManagerAgent(BaseAgent):
 
     def _build_risk_matrix(self, risks: List[Dict]) -> Dict[str, Any]:
         grid = {}
-        for p_label, p_range in [("低(0-0.3)", (0, 0.3)), ("中(0.3-0.5)", (0.3, 0.5)), ("高(0.5-1.0)", (0.5, 1.0))]:
-            for i_label, i_range in [("低(0-0.3)", (0, 0.3)), ("中(0.3-0.5)", (0.3, 0.5)), ("高(0.5-1.0)", (0.5, 1.0))]:
+        # Use simple labels matching frontend RiskMatrix key format ("低/低", "高/中" etc.)
+        LEVEL_LABELS = [("低", (0, 0.3)), ("中", (0.3, 0.5)), ("高", (0.5, 1.0))]
+        for p_label, p_range in LEVEL_LABELS:
+            for i_label, i_range in LEVEL_LABELS:
                 cell_key = f"{p_label}/{i_label}"
                 cell_risks = [
                     r for r in risks

@@ -10,6 +10,7 @@ const NAV_ITEMS = [
   { href: "/dashboard", label: "工作台", minRole: null as "viewer" | null },
   { href: "/workspace", label: "写PRD", minRole: "viewer" as const },
   { href: "/delivery", label: "交付中心", minRole: "viewer" as const },
+  { href: "/health", label: "健康度", minRole: "viewer" as const },
   { href: "/assets", label: "资产中心", minRole: "viewer" as const },
   { href: "/workflow", label: "工作流", minRole: "editor" as const },
   { href: "/audit", label: "审计日志", minRole: "admin" as const },

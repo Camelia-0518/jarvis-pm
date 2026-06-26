@@ -49,3 +49,30 @@ SESSION_MEMORY.md
 
 # All env files
 .env.*
+
+# SQLite WAL files
+*.db-shm
+*.db-wal
+
+# PID files
+*.pid
+
+# Local dev scripts
+_check_db.py
+_test*.py
+_test*.py
+test_api_direct.py
+test_delivery_integration.py
+test_extract_skeleton.py
+test_httpx.py
+test_kimi_sdk.py
+test_system_param.py
+apps/api/_demo_data.py
+apps/api/_gen_delivery.py
+apps/api/debug_agents.py
+apps/api/EOF
+apps/api/server_restart.err
+scripts/.jarvis-pm.pids
+temp_prd_ch1.md
+FEEDBACK_*.md
+test-results/
